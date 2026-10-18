@@ -3,12 +3,15 @@
 import sys
 
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
+from rich.console import Console
+from rich.markdown import Markdown
 
 from tinyagent import LLM, Memory, TinyAgent
 
 
 def chat(agent: TinyAgent) -> None:
     """Read one line at a time and keep completed turns in the agent's memory."""
+    console = Console()
     print(f"TinyAgent | Model: {agent.llm.model}")
     print("Ask a question. /clear resets history; /quit exits.\n")
 
@@ -43,7 +46,9 @@ def chat(agent: TinyAgent) -> None:
             print(f"{message} Previous conversation kept; you can try again.\n", file=sys.stderr)
             continue
 
-        print(f"TinyAgent: {answer}\n")
+        print("TinyAgent:")
+        console.print(Markdown(answer))
+        console.print()
 
 
 def main() -> int:

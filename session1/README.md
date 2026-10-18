@@ -47,6 +47,17 @@ The startup message shows the configured model. Type a question and press Enter;
 TinyAgent prints the reply and remembers previous turns for follow-up questions.
 Input is one line per message. Empty lines are ignored.
 
+Replies are rendered as Markdown using [Rich](https://rich.readthedocs.io/en/stable/markdown.html),
+so emphasis, lists, and fenced code blocks are easier to read. Code blocks have
+syntax highlighting in terminals that support color. Rendering changes only the
+display; conversation memory keeps the model's original text.
+
+If you installed dependencies before this feature was added, update them first:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
 - `/clear` resets conversation history without making an API request.
 - `/quit` exits. Ctrl+C or end-of-input (Ctrl+D on Linux/macOS) also exits.
 
@@ -117,3 +128,4 @@ memory without sending any requests to OpenAI or requiring a real API key.
 Terminal tests simulate input and model responses to verify follow-up history,
 clearing, quitting, error recovery, missing configuration, and client cleanup
 after normal exit, end-of-input, Ctrl+C, and unexpected errors.
+They also verify Markdown rendering while preserving the original response in memory.

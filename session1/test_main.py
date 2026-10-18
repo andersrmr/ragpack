@@ -45,7 +45,7 @@ class TerminalTests(unittest.TestCase):
              {"role": "user", "content": "Follow-up"}],
         ])
         self.assertIn("Model: test-model", output)
-        self.assertIn("TinyAgent: More detail", output)
+        self.assertIn("TinyAgent:\nMore detail", output)
         self.assertEqual(errors, "")
 
     def test_clear_removes_history_without_calling_model(self):
@@ -72,7 +72,19 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(histories[1], histories[2])
                 self.assertEqual(len(histories[2]), 3)
                 self.assertIn("Previous conversation kept", errors)
-                self.assertIn("TinyAgent: Recovered", output)
+                self.assertIn("TinyAgent:\nRecovered", output)
+
+    def test_markdown_is_rendered_but_original_text_stays_in_memory(self):
+        answer = "**Memory** stores turns.\n\n```python\nprint('hello')\n```"
+        _, histories, output, errors = self.run_chat(
+            ["Explain memory", "Continue", "/quit"], [answer, "Done"],
+        )
+        self.assertIn("Memory stores turns.", output)
+        self.assertIn("print('hello')", output)
+        self.assertNotIn("**Memory**", output)
+        self.assertNotIn("```", output)
+        self.assertEqual(histories[1][1], {"role": "assistant", "content": answer})
+        self.assertEqual(errors, "")
 
     def test_eof_and_ctrl_c_close_client(self):
         for interruption in [EOFError(), KeyboardInterrupt()]:
