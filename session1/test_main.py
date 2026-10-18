@@ -13,6 +13,7 @@ from openai import (
     AuthenticationError,
     RateLimitError,
 )
+from prompts import TUTOR_SYSTEM_PROMPT
 from tinyagent import Response
 
 
@@ -50,8 +51,12 @@ class TerminalTests(unittest.TestCase):
         self.assertEqual(
             histories,
             [
-                [{"role": "user", "content": "Hello"}],
                 [
+                    {"role": "system", "content": TUTOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": "Hello"},
+                ],
+                [
+                    {"role": "system", "content": TUTOR_SYSTEM_PROMPT},
                     {"role": "user", "content": "Hello"},
                     {"role": "assistant", "content": "Hi"},
                     {"role": "user", "content": "Follow-up"},
@@ -67,7 +72,10 @@ class TerminalTests(unittest.TestCase):
             ["Hello", "/clear", "Fresh start", "/quit"],
             ["Hi", "Welcome"],
         )
-        self.assertEqual(histories[-1], [{"role": "user", "content": "Fresh start"}])
+        self.assertEqual(histories[-1], [
+            {"role": "system", "content": TUTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": "Fresh start"},
+        ])
         self.assertIn("Conversation cleared", output)
 
     def test_errors_keep_completed_history_and_allow_retry(self):
@@ -93,7 +101,10 @@ class TerminalTests(unittest.TestCase):
                 )
                 self.assertEqual(result, 0)
                 self.assertEqual(histories[1], histories[2])
-                self.assertEqual(len(histories[2]), 3)
+                self.assertEqual(len(histories[2]), 4)
+                self.assertEqual(histories[2][0], {
+                    "role": "system", "content": TUTOR_SYSTEM_PROMPT,
+                })
                 self.assertIn("Previous conversation kept", errors)
                 self.assertIn("TinyAgent:\nRecovered", output)
 
@@ -107,7 +118,7 @@ class TerminalTests(unittest.TestCase):
         self.assertIn("print('hello')", output)
         self.assertNotIn("**Memory**", output)
         self.assertNotIn("```", output)
-        self.assertEqual(histories[1][1], {"role": "assistant", "content": answer})
+        self.assertEqual(histories[1][2], {"role": "assistant", "content": answer})
         self.assertEqual(errors, "")
 
     def test_eof_and_ctrl_c_close_client(self):

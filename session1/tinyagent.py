@@ -74,15 +74,21 @@ class Memory:
 class TinyAgent:
     """One model call per turn, as in the Session 1 example."""
 
-    def __init__(self, llm: LLM, memory: Memory):
+    def __init__(self, llm: LLM, memory: Memory, system_prompt: str = ""):
         self.llm = llm
         self.memory = memory
+        self.system_prompt = system_prompt
 
     def run(self, task: str) -> str:
         self.memory.add("user", task)
         return self._step()
 
     def _step(self) -> str:
-        response = self.llm.generate(self.memory.get_messages())
+        # Instructions are separate from chat history, so clearing memory keeps
+        # them in effect. Build a new list to avoid adding them to Memory.
+        messages = self.memory.get_messages().copy()
+        if self.system_prompt:
+            messages.insert(0, {"role": "system", "content": self.system_prompt})
+        response = self.llm.generate(messages)
         self.memory.add("assistant", response.content)
         return response.content

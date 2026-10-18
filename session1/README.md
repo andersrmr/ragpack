@@ -58,7 +58,7 @@ If you installed dependencies before this feature was added, update them first:
 python -m pip install -r requirements.txt
 ```
 
-- `/clear` resets conversation history without making an API request.
+- `/clear` resets conversation history, keeping the tutor instructions, without making an API request.
 - `/quit` exits. Ctrl+C or end-of-input (Ctrl+D on Linux/macOS) also exits.
 
 API errors are reported and the chat stays open. A failed request's unanswered
@@ -66,6 +66,25 @@ user turn is removed so you can re-enter it; completed turns remain available.
 The client is closed when the chat exits, including after errors or Ctrl+C.
 History is held in memory only and is lost when the program exits. Each question
 sent to the model makes a live API request; commands do not.
+
+## Session 1 tutor instructions
+
+Terminal chat automatically uses `TUTOR_SYSTEM_PROMPT` from `prompts.py`. You no
+longer need to paste the tutor instructions at the start of a conversation.
+The prompt asks for plain-language explanations tied to the course's three
+components, small Python examples, hints for exercises, direct answers when
+requested, and one question at a time when checking understanding. It also asks
+the tutor to avoid inventing course material or claiming access to unseen notes.
+
+Edit `prompts.py` and restart the chat to experiment with these instructions.
+`TinyAgent` prepends them as one `system` message on every request, separately
+from `Memory`, which stores only user and assistant turns. Consequently `/clear`
+and failed-request recovery do not remove or duplicate the instructions.
+The prompt uses input tokens on each request. It guides behavior; offline tests
+verify how it is sent, rather than whether a live model always follows it.
+
+Try asking “What does Memory do?”, requesting a hint for an exercise, and then
+using `/clear` before another course question to compare the tutoring behavior.
 
 ## Run the one-message smoke test
 
@@ -94,10 +113,11 @@ automatic retries are disabled so a smoke test does not silently retry.
 
 ```python
 from tinyagent import LLM, Memory, TinyAgent
+from prompts import TUTOR_SYSTEM_PROMPT
 
 llm = LLM()
 try:
-    agent = TinyAgent(llm=llm, memory=Memory())
+    agent = TinyAgent(llm=llm, memory=Memory(), system_prompt=TUTOR_SYSTEM_PROMPT)
     print(agent.run("What does conversation memory do?"))
     print(agent.run("Explain that with a small example."))
 finally:
@@ -111,7 +131,9 @@ As in the course example, a failed request leaves the latest user turn in memory
 The wrapper uses the SDK's Chat Completions method to keep the course's message
 format. Requests contain only `model` and `messages`; temperature and reasoning
 settings are omitted. `main.py` supplies the terminal interface without changing
-the core classes. A tutor prompt and graphical interface remain later changes.
+the overall class structure. `TinyAgent` accepts an optional `system_prompt`;
+omitting it keeps the original plain-chat behavior. Direct `LLM.generate()` calls
+(including the smoke test) are unaffected. A graphical interface remains a later change.
 
 Official references: [OpenAI Python SDK](https://developers.openai.com/api/reference/python)
 and [API quickstart](https://developers.openai.com/api/docs/quickstart).
@@ -129,3 +151,5 @@ Terminal tests simulate input and model responses to verify follow-up history,
 clearing, quitting, error recovery, missing configuration, and client cleanup
 after normal exit, end-of-input, Ctrl+C, and unexpected errors.
 They also verify Markdown rendering while preserving the original response in memory.
+Tutor tests check instruction ordering on every turn, memory separation, and
+persistence after `/clear` and failed requests. No live API calls are made.

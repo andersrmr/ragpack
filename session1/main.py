@@ -9,6 +9,7 @@ from openai import (
     AuthenticationError,
     RateLimitError,
 )
+from prompts import TUTOR_SYSTEM_PROMPT
 from rich.console import Console
 from rich.markdown import Markdown
 from tinyagent import LLM, Memory, TinyAgent
@@ -18,7 +19,7 @@ def chat(agent: TinyAgent) -> None:
     """Read one line at a time and keep completed turns in the agent's memory."""
     console = Console()
     print(f"TinyAgent | Model: {agent.llm.model}")
-    print("Ask a question. /clear resets history; /quit exits.\n")
+    print("Session 1 tutor enabled. /clear resets history; /quit exits.\n")
 
     while True:
         question = input("You: ").strip()
@@ -65,7 +66,7 @@ def main() -> int:
     llm = None
     try:
         llm = LLM()
-        chat(TinyAgent(llm=llm, memory=Memory()))
+        chat(TinyAgent(llm=llm, memory=Memory(), system_prompt=TUTOR_SYSTEM_PROMPT))
     except ValueError as error:
         print(f"Configuration error: {error}", file=sys.stderr)
         return 1
