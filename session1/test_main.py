@@ -3,6 +3,8 @@
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 import httpx
@@ -41,6 +43,62 @@ class TerminalTests(unittest.TestCase):
             result = main.main()
         llm.close.assert_called_once_with()
         return result, histories, output.getvalue(), errors.getvalue()
+
+    def test_save_exports_markdown_and_keeps_chat_history(self):
+        answer = "**Mémoire** stores turns.\n\n```python\nx = []\n```"
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "study notes.md"
+            result, histories, output, errors = self.run_chat(
+                ["Explain memory", f"/save {path}", "Continue", "/quit"],
+                [answer, "More detail"],
+            )
+            self.assertEqual(path.read_text(encoding="utf-8"),
+                             "# TinyAgent conversation\n\n## You\n\nExplain memory"
+                             f"\n\n## TinyAgent\n\n{answer}\n")
+        self.assertEqual(result, 0)
+        self.assertEqual(len(histories), 2)
+        self.assertEqual(histories[1][2], {"role": "assistant", "content": answer})
+        self.assertIn("Transcript saved", output)
+        self.assertEqual(errors, "")
+
+    def test_save_missing_filename_and_empty_history_make_no_requests(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.md"
+            _, histories, output, errors = self.run_chat(
+                ["/save", f"/save {path}", "Hello", "/clear", f"/save {path}", "/quit"],
+                ["Hi"],
+            )
+            self.assertFalse(path.exists())
+        self.assertEqual(len(histories), 1)
+        self.assertIn("Usage: /save filename.md", output)
+        self.assertEqual(output.count("No conversation to save"), 2)
+        self.assertEqual(errors, "")
+
+    def test_save_preserves_existing_file_and_can_retry(self):
+        with TemporaryDirectory() as directory:
+            existing = Path(directory) / "existing.md"
+            existing.write_text("My existing notes", encoding="utf-8")
+            new = Path(directory) / "new.md"
+            _, histories, output, errors = self.run_chat(
+                ["Hello", f"/save {existing}", f"/save {new}", "Continue", "/quit"],
+                ["Hi", "More detail"],
+            )
+            self.assertEqual(existing.read_text(encoding="utf-8"), "My existing notes")
+            self.assertIn("## TinyAgent\n\nHi", new.read_text(encoding="utf-8"))
+        self.assertEqual(len(histories[1]), 4)
+        self.assertIn("File already exists", errors)
+        self.assertIn("Transcript saved", output)
+
+    def test_save_file_error_does_not_end_chat_or_lose_history(self):
+        with patch("main.Path.open", side_effect=PermissionError("Permission denied")):
+            result, histories, output, errors = self.run_chat(
+                ["Hello", "/save notes.md", "Continue", "/quit"],
+                ["Hi", "More detail"],
+            )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(histories[1]), 4)
+        self.assertIn("Could not save transcript", errors)
+        self.assertIn("More detail", output)
 
     def test_history_blank_input_and_quit(self):
         result, histories, output, errors = self.run_chat(

@@ -60,11 +60,26 @@ python -m pip install -r requirements.txt
 
 - `/clear` resets conversation history, keeping the tutor instructions, without making an API request.
 - `/quit` exits. Ctrl+C or end-of-input (Ctrl+D on Linux/macOS) also exits.
+- `/save filename.md` exports the current conversation as Markdown.
+
+For example, type `/save study-notes.md` at the `You:` prompt. The file contains
+your questions and TinyAgent's answers in order, preserving Markdown and code
+blocks. Tutor instructions and terminal status messages are omitted. Open the
+file in VS Code and use Markdown Preview to read it.
+
+Relative paths are resolved from the directory where you launched the program.
+You can use an absolute path or `~/...`; spaces in filenames work without quotes,
+for example `/save study notes.md`. The parent directory must already exist.
+Existing files are never overwritten; choose a new filename for each export.
+If history is empty, nothing is written. Save errors leave the chat running.
+Saving makes no model request and does not clear or change the conversation.
+Use `/save` before `/clear` or exiting if you want to keep those turns; saved
+files remain on disk after either operation.
 
 API errors are reported and the chat stays open. A failed request's unanswered
 user turn is removed so you can re-enter it; completed turns remain available.
 The client is closed when the chat exits, including after errors or Ctrl+C.
-History is held in memory only and is lost when the program exits. Each question
+Unsaved history is held in memory only and is lost when the program exits. Each question
 sent to the model makes a live API request; commands do not.
 
 ## Session 1 tutor instructions
@@ -153,3 +168,6 @@ after normal exit, end-of-input, Ctrl+C, and unexpected errors.
 They also verify Markdown rendering while preserving the original response in memory.
 Tutor tests check instruction ordering on every turn, memory separation, and
 persistence after `/clear` and failed requests. No live API calls are made.
+Transcript tests use temporary files to check Markdown and Unicode preservation,
+empty history, missing filenames, overwrite protection, and recovery from file
+errors while retaining the conversation.

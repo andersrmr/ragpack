@@ -1,6 +1,7 @@
 """Minimal terminal chat using the Session 1 TinyAgent classes."""
 
 import sys
+from pathlib import Path
 
 from openai import (
     APIConnectionError,
@@ -15,11 +16,40 @@ from rich.markdown import Markdown
 from tinyagent import LLM, Memory, TinyAgent
 
 
+def save_transcript(memory: Memory, filename: str) -> None:
+    """Export chat turns, preserving their original Markdown."""
+    messages = [
+        message for message in memory.get_messages()
+        if message["role"] in ("user", "assistant")
+    ]
+    if not messages:
+        print("No conversation to save.\n")
+        return
+
+    sections = ["# TinyAgent conversation"]
+    for message in messages:
+        speaker = "You" if message["role"] == "user" else "TinyAgent"
+        sections.append(f"## {speaker}\n\n{message['content']}")
+    transcript = "\n\n".join(sections) + "\n"
+    try:
+        path = Path(filename).expanduser()
+        # Exclusive creation prevents accidentally overwriting existing notes.
+        with path.open("x", encoding="utf-8") as file:
+            file.write(transcript)
+    except FileExistsError:
+        print("File already exists. Choose another filename.\n", file=sys.stderr)
+    except (OSError, ValueError, UnicodeError) as error:
+        print(f"Could not save transcript: {error}\n", file=sys.stderr)
+    else:
+        print(f"Transcript saved to {path}.\n")
+
+
 def chat(agent: TinyAgent) -> None:
     """Read one line at a time and keep completed turns in the agent's memory."""
     console = Console()
     print(f"TinyAgent | Model: {agent.llm.model}")
-    print("Session 1 tutor enabled. /clear resets history; /quit exits.\n")
+    print("Session 1 tutor enabled. /clear resets history; /quit exits.")
+    print("/save filename.md saves the current conversation.\n")
 
     while True:
         question = input("You: ").strip()
@@ -30,6 +60,13 @@ def chat(agent: TinyAgent) -> None:
         if question == "/clear":
             agent.memory.messages.clear()
             print("Conversation cleared.\n")
+            continue
+        command = question.split(maxsplit=1)
+        if command[0] == "/save":
+            if len(command) == 1:
+                print("Usage: /save filename.md\n")
+            else:
+                save_transcript(agent.memory, command[1])
             continue
 
         # TinyAgent adds the user turn before making the request. On failure,
