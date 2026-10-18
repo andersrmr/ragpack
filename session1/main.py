@@ -2,10 +2,15 @@
 
 import sys
 
-from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIError,
+    APIStatusError,
+    AuthenticationError,
+    RateLimitError,
+)
 from rich.console import Console
 from rich.markdown import Markdown
-
 from tinyagent import LLM, Memory, TinyAgent
 
 
@@ -36,14 +41,19 @@ def chat(agent: TinyAgent) -> None:
             if isinstance(error, AuthenticationError):
                 message = "Authentication failed. Check OPENAI_API_KEY."
             elif isinstance(error, RateLimitError):
-                message = "Request limited. Check your API quota, billing, and rate limits."
+                message = (
+                    "Request limited. Check your API quota, billing, and rate limits."
+                )
             elif isinstance(error, APIConnectionError):
                 message = "Could not connect to OpenAI. Check your network connection."
             elif isinstance(error, APIStatusError):
                 message = f"OpenAI returned HTTP {error.status_code}. Check your model and account access."
             else:
                 message = "The request failed or returned no usable text."
-            print(f"{message} Previous conversation kept; you can try again.\n", file=sys.stderr)
+            print(
+                f"{message} Previous conversation kept; you can try again.\n",
+                file=sys.stderr,
+            )
             continue
 
         print("TinyAgent:")

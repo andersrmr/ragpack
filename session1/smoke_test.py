@@ -3,8 +3,12 @@
 import json
 import sys
 
-from openai import APIConnectionError, APIStatusError, AuthenticationError, RateLimitError
-
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    RateLimitError,
+)
 from tinyagent import LLM
 
 
@@ -12,9 +16,9 @@ def main() -> int:
     llm = None
     try:
         llm = LLM()
-        response = llm.generate([
-            {"role": "user", "content": "Say hello in one short sentence."}
-        ])
+        response = llm.generate(
+            [{"role": "user", "content": "Say hello in one short sentence."}]
+        )
         print(response.content)
         print(json.dumps(response.metadata, indent=2))
         return 0
@@ -23,9 +27,15 @@ def main() -> int:
     except AuthenticationError:
         print("Authentication failed. Check OPENAI_API_KEY.", file=sys.stderr)
     except RateLimitError:
-        print("Request limited. Check your API quota, billing, and rate limits.", file=sys.stderr)
+        print(
+            "Request limited. Check your API quota, billing, and rate limits.",
+            file=sys.stderr,
+        )
     except APIConnectionError:
-        print("Could not connect to OpenAI. Check your network connection.", file=sys.stderr)
+        print(
+            "Could not connect to OpenAI. Check your network connection.",
+            file=sys.stderr,
+        )
     except APIStatusError as error:
         print(
             f"OpenAI returned HTTP {error.status_code}. Check that TINYAGENT_MODEL "
