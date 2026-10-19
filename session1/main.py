@@ -14,23 +14,16 @@ from prompts import TUTOR_SYSTEM_PROMPT
 from rich.console import Console
 from rich.markdown import Markdown
 from tinyagent import LLM, Memory, TinyAgent
+from transcripts import format_transcript
 
 
 def save_transcript(memory: Memory, filename: str) -> None:
     """Export chat turns, preserving their original Markdown."""
-    messages = [
-        message for message in memory.get_messages()
-        if message["role"] in ("user", "assistant")
-    ]
-    if not messages:
+    transcript = format_transcript(memory)
+    if not transcript:
         print("No conversation to save.\n")
         return
 
-    sections = ["# TinyAgent conversation"]
-    for message in messages:
-        speaker = "You" if message["role"] == "user" else "TinyAgent"
-        sections.append(f"## {speaker}\n\n{message['content']}")
-    transcript = "\n\n".join(sections) + "\n"
     try:
         path = Path(filename).expanduser()
         # Exclusive creation prevents accidentally overwriting existing notes.

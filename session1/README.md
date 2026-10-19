@@ -82,9 +82,48 @@ The client is closed when the chat exits, including after errors or Ctrl+C.
 Unsaved history is held in memory only and is lost when the program exits. Each question
 sent to the model makes a live API request; commands do not.
 
+## Launch browser chat with Gradio
+
+The terminal interface remains available. For browser chat, activate the same
+environment, install the optional browser dependencies, and run:
+
+```bash
+cd session1  # If you are currently at the repository root.
+source .venv/bin/activate
+python -m pip install -r requirements-gradio.txt
+python gradio_app.py
+```
+
+Keep `OPENAI_API_KEY` and `TINYAGENT_MODEL` configured as above. Open the local
+URL printed in the terminal (usually `http://127.0.0.1:7860`). The app binds to
+localhost and does not create a public sharing link. The key stays server-side.
+
+- **Send** submits the question. The browser renders Markdown and code blocks.
+  The textbox supports multiline input.
+- **Clear conversation** removes the current tab's history, retaining tutor instructions.
+- **Save transcript** prepares a Markdown file. Click the resulting file link to
+  download it; your browser handles the destination and filename. Each export
+  gets a unique temporary filename, and existing study notes are unaffected.
+- **End session** closes this tab's LLM client and disables sending. The history
+  stays visible and can still be saved. Refresh to start a new session.
+
+Use these buttons instead of the terminal's slash commands. Each browser session
+has its own memory and client. The model name appears in the status box. API
+errors retain completed turns and your question so you can retry. Clear, Save,
+and End make no model calls. The terminal and browser use the same tutor prompt
+and transcript format; the core classes remain unchanged.
+
+Refreshing or closing the tab discards the session; save first. Disconnect cleanup
+closes that tab's client and removes its temporary exports. Gradio state deletion
+provides a cleanup fallback after its disconnect grace period. Download cache
+files are cleaned periodically (hourly, for files older than an hour). Files
+already downloaded to your computer remain yours. Stop the server with Ctrl+C
+in its terminal to close all remaining clients. Actions are queued one at a time
+to keep Send, Clear, Save, and End from changing history simultaneously.
+
 ## Session 1 tutor instructions
 
-Terminal chat automatically uses `TUTOR_SYSTEM_PROMPT` from `prompts.py`. You no
+Terminal and browser chat automatically use `TUTOR_SYSTEM_PROMPT` from `prompts.py`. You no
 longer need to paste the tutor instructions at the start of a conversation.
 The prompt asks for plain-language explanations tied to the course's three
 components, small Python examples, hints for exercises, direct answers when
@@ -148,7 +187,7 @@ format. Requests contain only `model` and `messages`; temperature and reasoning
 settings are omitted. `main.py` supplies the terminal interface without changing
 the overall class structure. `TinyAgent` accepts an optional `system_prompt`;
 omitting it keeps the original plain-chat behavior. Direct `LLM.generate()` calls
-(including the smoke test) are unaffected. A graphical interface remains a later change.
+(including the smoke test) are unaffected. `gradio_app.py` adds the browser interface.
 
 Official references: [OpenAI Python SDK](https://developers.openai.com/api/reference/python)
 and [API quickstart](https://developers.openai.com/api/docs/quickstart).
@@ -171,3 +210,8 @@ persistence after `/clear` and failed requests. No live API calls are made.
 Transcript tests use temporary files to check Markdown and Unicode preservation,
 empty history, missing filenames, overwrite protection, and recovery from file
 errors while retaining the conversation.
+With `requirements-gradio.txt` installed, discovery also runs browser tests for
+session isolation, tutor persistence, error recovery, exports, end/disconnect
+cleanup, server shutdown, and Gradio component construction. They use fake LLMs
+and temporary files, without live API calls or a listening web server. Browser
+tests are skipped if Gradio is not installed.
