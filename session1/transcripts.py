@@ -1,6 +1,6 @@
 """Markdown transcript formatting and saving shared by both interfaces."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -11,7 +11,7 @@ from tinyagent import Memory
 def write_transcript(filename: str | Path, transcript: str) -> Path:
     """Save using New York time, adding a counter for same-second collisions."""
     path = Path(filename).expanduser()
-    saved_at = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    saved_at = datetime.now(UTC).astimezone(ZoneInfo("America/New_York"))
     stem = f"{path.stem}-{saved_at:%Y-%m-%d_%H-%M-%S}"
     for number in count(1):
         extra = "" if number == 1 else f"-{number}"
@@ -27,7 +27,8 @@ def write_transcript(filename: str | Path, transcript: str) -> Path:
 
 def format_transcript(memory: Memory) -> str:
     messages = [
-        message for message in memory.get_messages()
+        message
+        for message in memory.get_messages()
         if message["role"] in ("user", "assistant")
     ]
     if not messages:
