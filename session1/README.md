@@ -62,7 +62,9 @@ python -m pip install -r requirements.txt
 - `/quit` exits. Ctrl+C or end-of-input (Ctrl+D on Linux/macOS) also exits.
 - `/save filename.md` exports the current conversation as Markdown.
 
-For example, type `/save study-notes.md` at the `You:` prompt. The file contains
+For example, type `/save study-notes.md` at the `You:` prompt. This creates a file
+such as `study-notes-2026-10-18_17-38-50.md`, using the time of saving in
+America/New_York (with daylight saving time handled automatically). The file contains
 your questions and TinyAgent's answers in order, preserving Markdown and code
 blocks. Tutor instructions and terminal status messages are omitted. Open the
 file in VS Code and use Markdown Preview to read it.
@@ -70,7 +72,9 @@ file in VS Code and use Markdown Preview to read it.
 Relative paths are resolved from the directory where you launched the program.
 You can use an absolute path or `~/...`; spaces in filenames work without quotes,
 for example `/save study notes.md`. The parent directory must already exist.
-Existing files are never overwritten; choose a new filename for each export.
+Existing files are never overwritten. You can reuse the same `/save` command;
+if the timestamped filename already exists, a counter is appended, such as
+`study-notes-2026-10-18_17-38-50-2.md`.
 If history is empty, nothing is written. Save errors leave the chat running.
 Saving makes no model request and does not clear or change the conversation.
 Use `/save` before `/clear` or exiting if you want to keep those turns; saved
@@ -103,7 +107,9 @@ localhost and does not create a public sharing link. The key stays server-side.
 - **Clear conversation** removes the current tab's history, retaining tutor instructions.
 - **Save transcript** prepares a Markdown file. Click the resulting file link to
   download it; your browser handles the destination and filename. Each export
-  gets a unique temporary filename, and existing study notes are unaffected.
+  gets a timestamped filename such as `conversation-2026-10-18_17-38-50.md`,
+  using America/New_York save time. A counter is added for same-second exports,
+  and existing study notes are unaffected.
 - **End session** closes this tab's LLM client and disables sending. The history
   stays visible and can still be saved. Refresh to start a new session.
 

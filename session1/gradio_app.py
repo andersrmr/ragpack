@@ -4,13 +4,12 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import RLock
-from uuid import uuid4
 
 import gradio as gr
 from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
 from prompts import TUTOR_SYSTEM_PROMPT
 from tinyagent import LLM, Memory, TinyAgent
-from transcripts import format_transcript
+from transcripts import format_transcript, write_transcript
 
 
 class ChatSession:
@@ -68,8 +67,9 @@ class ChatSession:
             try:
                 if self.downloads is None:
                     self.downloads = TemporaryDirectory(prefix="tinyagent-")
-                path = Path(self.downloads.name) / f"conversation-{uuid4().hex}.md"
-                path.write_text(transcript, encoding="utf-8")
+                path = write_transcript(
+                    Path(self.downloads.name) / "conversation.md", transcript,
+                )
             except (OSError, UnicodeError):
                 return None, "Could not prepare the transcript. Conversation kept; try again."
             return str(path), "Transcript ready. Click the file below to download it."

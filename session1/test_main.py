@@ -3,6 +3,7 @@
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -20,6 +21,11 @@ from tinyagent import Response
 
 
 class TerminalTests(unittest.TestCase):
+    def setUp(self):
+        clock = patch("transcripts.datetime").start()
+        self.addCleanup(patch.stopall)
+        clock.now.return_value = datetime(2026, 10, 18, 21, 38, 50, tzinfo=timezone.utc)
+
     def run_chat(self, inputs, replies=()):
         llm = Mock(model="test-model")
         histories = []
@@ -52,7 +58,9 @@ class TerminalTests(unittest.TestCase):
                 ["Explain memory", f"/save {path}", "Continue", "/quit"],
                 [answer, "More detail"],
             )
-            self.assertEqual(path.read_text(encoding="utf-8"),
+            saved = path.with_name("study notes-2026-10-18_17-38-50.md")
+            self.assertFalse(path.exists())
+            self.assertEqual(saved.read_text(encoding="utf-8"),
                              "# TinyAgent conversation\n\n## You\n\nExplain memory"
                              f"\n\n## TinyAgent\n\n{answer}\n")
         self.assertEqual(result, 0)
@@ -78,19 +86,24 @@ class TerminalTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             existing = Path(directory) / "existing.md"
             existing.write_text("My existing notes", encoding="utf-8")
+            collision = Path(directory) / "existing-2026-10-18_17-38-50.md"
+            collision.write_text("Earlier export", encoding="utf-8")
             new = Path(directory) / "new.md"
             _, histories, output, errors = self.run_chat(
                 ["Hello", f"/save {existing}", f"/save {new}", "Continue", "/quit"],
                 ["Hi", "More detail"],
             )
             self.assertEqual(existing.read_text(encoding="utf-8"), "My existing notes")
-            self.assertIn("## TinyAgent\n\nHi", new.read_text(encoding="utf-8"))
+            self.assertEqual(collision.read_text(encoding="utf-8"), "Earlier export")
+            self.assertTrue((Path(directory) / "existing-2026-10-18_17-38-50-2.md").exists())
+            saved = new.with_name("new-2026-10-18_17-38-50.md")
+            self.assertIn("## TinyAgent\n\nHi", saved.read_text(encoding="utf-8"))
         self.assertEqual(len(histories[1]), 4)
-        self.assertIn("File already exists", errors)
+        self.assertEqual(errors, "")
         self.assertIn("Transcript saved", output)
 
     def test_save_file_error_does_not_end_chat_or_lose_history(self):
-        with patch("main.Path.open", side_effect=PermissionError("Permission denied")):
+        with patch("transcripts.Path.open", side_effect=PermissionError("Permission denied")):
             result, histories, output, errors = self.run_chat(
                 ["Hello", "/save notes.md", "Continue", "/quit"],
                 ["Hi", "More detail"],

@@ -1,7 +1,6 @@
 """Minimal terminal chat using the Session 1 TinyAgent classes."""
 
 import sys
-from pathlib import Path
 
 from openai import (
     APIConnectionError,
@@ -14,7 +13,7 @@ from prompts import TUTOR_SYSTEM_PROMPT
 from rich.console import Console
 from rich.markdown import Markdown
 from tinyagent import LLM, Memory, TinyAgent
-from transcripts import format_transcript
+from transcripts import format_transcript, write_transcript
 
 
 def save_transcript(memory: Memory, filename: str) -> None:
@@ -25,12 +24,7 @@ def save_transcript(memory: Memory, filename: str) -> None:
         return
 
     try:
-        path = Path(filename).expanduser()
-        # Exclusive creation prevents accidentally overwriting existing notes.
-        with path.open("x", encoding="utf-8") as file:
-            file.write(transcript)
-    except FileExistsError:
-        print("File already exists. Choose another filename.\n", file=sys.stderr)
+        path = write_transcript(filename, transcript)
     except (OSError, ValueError, UnicodeError) as error:
         print(f"Could not save transcript: {error}\n", file=sys.stderr)
     else:

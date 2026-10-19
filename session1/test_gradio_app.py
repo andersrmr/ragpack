@@ -2,6 +2,7 @@
 
 import importlib.util
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -75,8 +76,12 @@ class BrowserTests(unittest.TestCase):
         self.session.send("Explain")
         history = self.session.history()
         self.session.end()
-        first, _ = self.session.save()
-        second, _ = self.session.save()
+        with patch("transcripts.datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 18, 21, 38, 50, tzinfo=timezone.utc)
+            first, _ = self.session.save()
+            second, _ = self.session.save()
+        self.assertEqual(Path(first).name, "conversation-2026-10-18_17-38-50.md")
+        self.assertEqual(Path(second).name, "conversation-2026-10-18_17-38-50-2.md")
         self.assertNotEqual(first, second)
         transcript = Path(first).read_text(encoding="utf-8")
         self.assertIn("## You\n\nExplain", transcript)
@@ -99,7 +104,7 @@ class BrowserTests(unittest.TestCase):
     def test_export_error_keeps_history(self):
         self.session.send("Hello")
         previous = self.session.history()
-        with patch("gradio_app.Path.write_text", side_effect=OSError("disk full")):
+        with patch("transcripts.Path.open", side_effect=OSError("disk full")):
             path, status = self.session.save()
         self.assertIsNone(path)
         self.assertIn("Could not prepare", status)
