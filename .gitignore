@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 env/
+session2/.venv/
+session2/results/
 
 # Local environment variables and credentials
 .env

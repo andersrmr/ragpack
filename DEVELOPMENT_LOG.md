@@ -1,5 +1,35 @@
 # TinyAgent Development Log
 
+## Session 2 — Reasoning comparison (started 2026-10-21)
+
+Session 1 remains the reproducible checkpoint in `session1/`. Session 2 starts
+in its own directory and begins with Experiment 1: compare reasoning effort on
+the same questions before adding trajectory inspection, file-based skills, or
+attachment support.
+
+### Initial implementation
+
+- Added `session2/tinyagent.py` with configurable reasoning effort, a structured
+  `Response.reasoning` field, provider-supplied reasoning summaries, and token
+  metadata. `Memory` stores only user and assistant content.
+- Added `session2/reasoning_comparison.py`, a repeatable benchmark over five
+  fixed questions. It reports exact-match accuracy, latency, input/output and
+  reasoning token counts, plus optional cost estimates from user-supplied
+  current per-million-token rates.
+- Results are written as timestamped JSON under `session2/results/`, which is
+  ignored by Git. Existing result files are not overwritten. Each trial records
+  the answer and available reasoning summary for local inspection.
+- Added standalone setup and experiment instructions in `session2/README.md`.
+  The tool uses the OpenAI Responses API; model availability and supported
+  reasoning settings depend on the user's account and selected model.
+
+### Next
+
+- Configure `TINYAGENT_MODEL` to a reasoning-capable model, choose supported
+  effort values, and run a small comparison to validate the live API path.
+- Review the first results and decide whether to add more questions or proceed
+  to trajectory inspection.
+
 ## Session 1 — OpenAI API Integration
 
 **Course:** Introduction to Agents  
@@ -96,6 +126,7 @@ chat and tutoring, without RAG, tool calling, or autonomous execution.
 
 ### Working state and next steps
 
+- Session 1 used `gpt-6-luna` for `TINYAGENT_MODEL`.
 - Latest verification: **28 offline tests passed**, including terminal/browser
   history, tutor persistence, error recovery, exports, timestamp conversion,
   overwrite protection, and client cleanup. Separate Gradio chat/download and
