@@ -12,7 +12,6 @@ from zoneinfo import ZoneInfo
 from openai import APIError
 from tinyagent import LLM
 
-
 QUESTIONS = [
     {
         "id": "bat_ball",
@@ -62,15 +61,25 @@ def normalize(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", text.casefold())
 
 
-def summarize(records: list[dict], input_price: float | None, output_price: float | None) -> list[dict]:
+def summarize(
+    records: list[dict], input_price: float | None, output_price: float | None
+) -> list[dict]:
     """Aggregate trial results by requested reasoning effort."""
     summaries = []
     for effort in dict.fromkeys(row["reasoning_effort"] for row in records):
         group = [row for row in records if row["reasoning_effort"] == effort]
         durations = [row["latency_seconds"] for row in group]
-        prompt_tokens = [row["input_tokens"] for row in group if row["input_tokens"] is not None]
-        output_tokens = [row["output_tokens"] for row in group if row["output_tokens"] is not None]
-        reasoning_tokens = [row["reasoning_tokens"] for row in group if row["reasoning_tokens"] is not None]
+        prompt_tokens = [
+            row["input_tokens"] for row in group if row["input_tokens"] is not None
+        ]
+        output_tokens = [
+            row["output_tokens"] for row in group if row["output_tokens"] is not None
+        ]
+        reasoning_tokens = [
+            row["reasoning_tokens"]
+            for row in group
+            if row["reasoning_tokens"] is not None
+        ]
         summary = {
             "reasoning_effort": effort,
             "attempts": len(group),
@@ -82,7 +91,12 @@ def summarize(records: list[dict], input_price: float | None, output_price: floa
             "output_tokens": sum(output_tokens) if output_tokens else None,
             "reasoning_tokens": sum(reasoning_tokens) if reasoning_tokens else None,
         }
-        if input_price is not None and output_price is not None and prompt_tokens and output_tokens:
+        if (
+            input_price is not None
+            and output_price is not None
+            and prompt_tokens
+            and output_tokens
+        ):
             summary["estimated_cost_usd"] = (
                 summary["input_tokens"] * input_price
                 + summary["output_tokens"] * output_price
@@ -97,22 +111,44 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", help="Model ID; defaults to TINYAGENT_MODEL.")
     parser.add_argument(
-        "--efforts", default="low,medium,high",
+        "--efforts",
+        default="low,medium,high",
         help="Comma-separated reasoning efforts to compare (default: low,medium,high).",
     )
-    parser.add_argument("--repetitions", type=int, default=3, help="Trials per question and effort (default: 3).")
-    parser.add_argument("--input-price", type=float, help="Current USD price per million input tokens.")
-    parser.add_argument("--output-price", type=float, help="Current USD price per million output tokens.")
-    parser.add_argument("--output", type=Path, help="JSON results path (default: session2/results/<timestamp>.json).")
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=3,
+        help="Trials per question and effort (default: 3).",
+    )
+    parser.add_argument(
+        "--input-price", type=float, help="Current USD price per million input tokens."
+    )
+    parser.add_argument(
+        "--output-price",
+        type=float,
+        help="Current USD price per million output tokens.",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="JSON results path (default: session2/results/<timestamp>.json).",
+    )
     args = parser.parse_args()
-    args.efforts = [effort.strip() for effort in args.efforts.split(",") if effort.strip()]
+    args.efforts = [
+        effort.strip() for effort in args.efforts.split(",") if effort.strip()
+    ]
     if not args.efforts:
         parser.error("provide at least one reasoning effort")
     if args.repetitions < 1:
         parser.error("--repetitions must be at least 1")
     if (args.input_price is None) != (args.output_price is None):
         parser.error("provide both --input-price and --output-price, or neither")
-    if any(price < 0 for price in (args.input_price, args.output_price) if price is not None):
+    if any(
+        price < 0
+        for price in (args.input_price, args.output_price)
+        if price is not None
+    ):
         parser.error("prices cannot be negative")
     return args
 
@@ -135,15 +171,21 @@ def main() -> int:
                 for item in QUESTIONS:
                     started = time.perf_counter()
                     try:
-                        response = llm.generate([{"role": "user", "content": item["question"]}])
+                        response = llm.generate(
+                            [{"role": "user", "content": item["question"]}]
+                        )
                     except APIError as error:
-                        print(f"Failed: {effort} / {item['id']} / trial {repetition}: {error}")
-                        failures.append({
-                            "reasoning_effort": effort,
-                            "question_id": item["id"],
-                            "trial": repetition,
-                            "error": str(error),
-                        })
+                        print(
+                            f"Failed: {effort} / {item['id']} / trial {repetition}: {error}"
+                        )
+                        failures.append(
+                            {
+                                "reasoning_effort": effort,
+                                "question_id": item["id"],
+                                "trial": repetition,
+                                "error": str(error),
+                            }
+                        )
                         failed_effort = True
                         break
                     latency = time.perf_counter() - started
