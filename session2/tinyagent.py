@@ -1,7 +1,10 @@
 """Session 2 core: OpenAI responses with configurable reasoning effort."""
 
 import os
+import time
 from dataclasses import dataclass
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
@@ -15,15 +18,98 @@ class Response:
     metadata: dict | None = None
 
 
+@dataclass
+class Step:
+    """One model invocation recorded for developer inspection."""
+
+    step_id: int
+    reasoning_effort: str
+    model: str
+    input_messages: list[dict]
+    latency_seconds: float
+    answer: str | None = None
+    reasoning: str = ""
+    metadata: dict | None = None
+    error: dict | None = None
+
+
+@dataclass
+class Run:
+    """One agent execution started by a user task."""
+
+    run_id: int
+    query: str
+    started_at: str
+    metadata: dict
+    steps: list[Step]
+    duration_seconds: float = 0.0
+
+
+class Trajectory:
+    """Keep an inspectable record of agent runs and their model calls."""
+
+    def __init__(self):
+        self.runs: list[Run] = []
+
+    def initialize(self, query: str, metadata: dict | None = None) -> Run:
+        run = Run(
+            run_id=len(self.runs) + 1,
+            query=query,
+            started_at=datetime.now(ZoneInfo("America/New_York")).isoformat(),
+            metadata=dict(metadata or {}),
+            steps=[],
+        )
+        self.runs.append(run)
+        return run
+
+    def add(self, run: Run, step: Step) -> None:
+        run.steps.append(step)
+
+    def to_dict(self) -> dict:
+        """Return JSON-serializable trajectory data."""
+        return {
+            "schema_version": 1,
+            "runs": [
+                {
+                    "run_id": run.run_id,
+                    "query": run.query,
+                    "started_at": run.started_at,
+                    "duration_seconds": run.duration_seconds,
+                    "metadata": run.metadata,
+                    "steps": [
+                        {
+                            "step_id": step.step_id,
+                            "reasoning_effort": step.reasoning_effort,
+                            "model": step.model,
+                            "input_messages": step.input_messages,
+                            "latency_seconds": step.latency_seconds,
+                            "answer": step.answer,
+                            "reasoning": step.reasoning,
+                            "metadata": step.metadata,
+                            "error": step.error,
+                        }
+                        for step in run.steps
+                    ],
+                }
+                for run in self.runs
+            ],
+        }
+
+
 class LLM:
     """Keep provider configuration and response parsing in one place."""
 
     def __init__(self, model: str | None = None, reasoning_effort: str = "medium"):
         api_key = os.environ.get("OPENAI_API_KEY", "").strip()
         if not api_key:
-            raise ValueError("Set OPENAI_API_KEY in your environment before creating LLM.")
+            raise ValueError(
+                "Set OPENAI_API_KEY in your environment before creating LLM."
+            )
 
-        self.model = (model if model is not None else os.environ.get("TINYAGENT_MODEL", "")).strip()
+        configured_model = (
+            model if model is not None else os.environ.get("TINYAGENT_MODEL", "")
+        )
+        self.model = configured_model.strip()
         if not self.model:
             raise ValueError(
                 "Set TINYAGENT_MODEL to a model available to your OpenAI account, "
@@ -91,14 +177,50 @@ class Memory:
 
 
 class TinyAgent:
-    """One user turn and one LLM response, preserving the Session 1 workflow."""
+    """Coordinate conversation memory and record each model call."""
 
     def __init__(self, llm: LLM, memory: Memory):
         self.llm = llm
         self.memory = memory
+        self.trajectory = Trajectory()
 
-    def run(self, task: str) -> Response:
+    def run(self, task: str, run_metadata: dict | None = None) -> Response:
+        run = self.trajectory.initialize(task, run_metadata)
         self.memory.add("user", task)
-        response = self.llm.generate(self.memory.get_messages())
+        messages = [message.copy() for message in self.memory.get_messages()]
+        started = time.perf_counter()
+        try:
+            response = self.llm.generate(messages)
+        except Exception as error:
+            elapsed = time.perf_counter() - started
+            self.trajectory.add(
+                run,
+                Step(
+                    step_id=len(run.steps) + 1,
+                    reasoning_effort=self.llm.reasoning_effort,
+                    model=self.llm.model,
+                    input_messages=messages,
+                    latency_seconds=round(elapsed, 4),
+                    error={"type": type(error).__name__, "message": str(error)},
+                ),
+            )
+            run.duration_seconds = round(elapsed, 4)
+            raise
+
+        elapsed = time.perf_counter() - started
+        self.trajectory.add(
+            run,
+            Step(
+                step_id=len(run.steps) + 1,
+                reasoning_effort=self.llm.reasoning_effort,
+                model=(response.metadata or {}).get("model", self.llm.model),
+                input_messages=messages,
+                latency_seconds=round(elapsed, 4),
+                answer=response.content,
+                reasoning=response.reasoning,
+                metadata=response.metadata,
+            ),
+        )
+        run.duration_seconds = round(elapsed, 4)
         self.memory.add("assistant", response.content)
         return response

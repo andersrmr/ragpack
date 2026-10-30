@@ -3,9 +3,9 @@
 ## Session 2 — Reasoning comparison (started 2026-10-21)
 
 Session 1 remains the reproducible checkpoint in `session1/`. Session 2 starts
-in its own directory and begins with Experiment 1: compare reasoning effort on
-the same questions before adding trajectory inspection, file-based skills, or
-attachment support.
+in its own directory with Experiment 1 (reasoning comparison), followed by
+Experiment 2 (trajectory inspection), before file-based skills or attachment
+support.
 
 ### Initial implementation
 
@@ -23,12 +23,25 @@ attachment support.
   The tool uses the OpenAI Responses API; model availability and supported
   reasoning settings depend on the user's account and selected model.
 
+## Session 2 — Trajectory inspection
+
+- Added `Trajectory`, `Run`, and `Step` records to `session2/tinyagent.py`.
+  TinyAgent records model inputs, reasoning effort, model name, latency,
+  response summary, answer, token usage, and call errors. Reasoning stays out of
+  conversation memory.
+- Routed each fixed-question benchmark call through `TinyAgent`; the JSON
+  experiment file now contains both the existing trial summary and structured
+  trajectory runs.
+- Added `session2/trajectory_viewer.py`, which creates a self-contained HTML
+  report from new trajectory data or earlier reasoning comparison JSON files.
+  The report shows aggregate metrics and expandable call details.
+- Documented report generation in `session2/README.md`. No new package
+  dependency is required.
+
 ### Next
 
-- Configure `TINYAGENT_MODEL` to a reasoning-capable model, choose supported
-  effort values, and run a small comparison to validate the live API path.
-- Review the first results and decide whether to add more questions or proceed
-  to trajectory inspection.
+- Review the first experiment results and decide whether to expand the fixed
+  question set or proceed to file-based skills.
 
 ## Session 1 — OpenAI API Integration
 

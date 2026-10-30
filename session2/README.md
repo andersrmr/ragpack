@@ -58,6 +58,24 @@ The summary includes accuracy, mean and median latency, and aggregate token
 counts. Exact-match grading normalizes case and punctuation; it does not grade
 semantically equivalent explanations.
 
+## Inspect a trajectory
+
+Each benchmark attempt is a TinyAgent run. The agent records its query and each
+model call, including input messages, selected effort, latency, answer,
+reasoning summary, token metadata, and any call error. Reasoning summaries stay
+out of `Memory` and are included in local experiment files for inspection.
+
+Generate a self-contained HTML report from a result file:
+
+```bash
+python trajectory_viewer.py results/reasoning-YYYYMMDD-HHMMSS.json
+```
+
+The report is written beside the JSON file with an `.html` extension. Open it
+locally in a browser. It shows aggregate measurements and expandable run/call
+details. The viewer also reads result files created before trajectory recording
+was added.
+
 To estimate cost, supply the current per-million-token prices for the model you
 are using:
 
@@ -78,6 +96,8 @@ other account-level charges or discounts.
 - `Memory` stores conversation turns without reasoning summaries.
 - `TinyAgent` still performs one model call per user turn and returns a
   structured `Response`.
+- `Trajectory` records runs and their model calls, including request messages,
+  usage, latency, answers, reasoning summaries, and errors.
 
-Trajectory viewing, file attachments, file-loaded instructions, and additional
-skills are later experiments; they are not part of this first comparison.
+File attachments, file-loaded instructions, and additional skills remain later
+experiments.

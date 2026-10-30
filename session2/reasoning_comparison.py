@@ -4,13 +4,12 @@ import argparse
 import json
 import re
 import statistics
-import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from openai import APIError
-from tinyagent import LLM
+from tinyagent import LLM, Memory, TinyAgent
 
 QUESTIONS = [
     {
@@ -158,25 +157,36 @@ def main() -> int:
     model = args.model
     results = []
     llm = None
+    agent = None
     failures = []
     interrupted = False
     try:
         # Initialize once; update effort per condition to hold other settings constant.
         llm = LLM(model=model, reasoning_effort=args.efforts[0])
+        agent = TinyAgent(llm=llm, memory=Memory())
         model = llm.model
         for effort in args.efforts:
             llm.reasoning_effort = effort
             failed_effort = False
             for repetition in range(1, args.repetitions + 1):
                 for item in QUESTIONS:
-                    started = time.perf_counter()
                     try:
-                        response = llm.generate(
-                            [{"role": "user", "content": item["question"]}]
+                        # Each benchmark question is independent; retain its
+                        # trajectory entry but clear conversation context.
+                        agent.memory.messages.clear()
+                        response = agent.run(
+                            item["question"],
+                            run_metadata={
+                                "question_id": item["id"],
+                                "trial": repetition,
+                                "reasoning_effort": effort,
+                                "answer_key": item["answer"],
+                            },
                         )
-                    except APIError as error:
+                    except (APIError, RuntimeError) as error:
                         print(
-                            f"Failed: {effort} / {item['id']} / trial {repetition}: {error}"
+                            f"Failed: {effort} / {item['id']} / trial "
+                            f"{repetition}: {error}"
                         )
                         failures.append(
                             {
@@ -188,8 +198,11 @@ def main() -> int:
                         )
                         failed_effort = True
                         break
-                    latency = time.perf_counter() - started
+                    run = agent.trajectory.runs[-1]
+                    step = run.steps[-1]
+                    latency = step.latency_seconds
                     correct = normalize(response.content) == normalize(item["answer"])
+                    run.metadata["correct"] = correct
                     metadata = response.metadata or {}
                     row = {
                         "reasoning_effort": effort,
@@ -203,6 +216,8 @@ def main() -> int:
                         "output_tokens": metadata.get("output_tokens"),
                         "reasoning_tokens": metadata.get("reasoning_tokens"),
                         "reasoning_summary": response.reasoning,
+                        "run_id": run.run_id,
+                        "step_id": step.step_id,
                     }
                     results.append(row)
                     print(
@@ -231,7 +246,8 @@ def main() -> int:
     print("\nSummary")
     for row in summaries:
         print(
-            f"{row['reasoning_effort']:>7} | accuracy={row['correct']}/{row['attempts']} "
+            f"{row['reasoning_effort']:>7} | "
+            f"accuracy={row['correct']}/{row['attempts']} "
             f"({row['accuracy']:.1%}) | mean={row['mean_latency_seconds']:.2f}s "
             f"| input={row['input_tokens']} output={row['output_tokens']} "
             f"reasoning={row['reasoning_tokens']} | cost={row['estimated_cost_usd']}"
@@ -255,6 +271,11 @@ def main() -> int:
         },
         "summary": summaries,
         "trials": results,
+        "trajectory": (
+            agent.trajectory.to_dict()
+            if agent
+            else {"schema_version": 1, "runs": []}
+        ),
         "failures": failures,
         "interrupted": interrupted,
     }
