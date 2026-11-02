@@ -38,6 +38,50 @@ support.
 - Documented report generation in `session2/README.md`. No new package
   dependency is required.
 
+## Session 2 — Persistent context, manual quiz skill, and tutor UI (2026-11-01)
+
+- Kept the Session 2 `LLM`, `Response`, `Memory`, `Trajectory`, `Step`, and
+  `TinyAgent` as the core. Session 1's prompt, transcript, and Gradio patterns
+  informed the new interfaces without replacing the Session 2 architecture.
+- Added `about_me.md` with editable placeholder sections and a reloadable
+  persistent-context loader. Tutor instructions and personal context are
+  combined into one system message and remain outside conversation Memory.
+- Added `skills/quiz_me.md` and `QuizManager`. Explicit `/quiz` activation loads
+  the skill, validates structured JSON questions, tracks responses, and writes
+  unique Markdown artifacts under `quizzes/`. `/quiz end` removes skill
+  instructions. Model requests do not write files or invoke Python tools.
+- Added Session 2 terminal and Gradio applications using the same TinyAgent.
+  Gradio has Chat, Trajectory, and Context tabs, session-local chat state,
+  transcript downloads, quiz controls, context reload, and independent
+  conversation/trajectory clearing.
+- Expanded trajectory usage metadata to include prompt, completion, and total
+  token aliases. The view labels absent reasoning summaries instead of
+  manufacturing reasoning text.
+- Added offline tests for context loading/reload/clearing, quiz activation and
+  completion, artifact contents, skill deactivation, trajectory records, and
+  Gradio session observability. Tests use fake model responses only.
+- Updated `session2/README.md` with launch commands and the distinctions among
+  persistent instructions, temporary skills, Memory, Trajectory, and manual
+  orchestration.
+
+### Validation
+
+- Session 1 regression suite: 28 tests passed.
+- Session 2 suite: 8 offline tests passed, including Responses API parsing with
+  a fake response, Gradio construction, session observability, safe quiz
+  filenames, and overwrite protection.
+- Python compilation check completed without syntax errors.
+- No live API requests were made. Browser UI verification is based on
+  construction and offline session checks, not a live Gradio browser session.
+
+### Limitations and follow-up
+
+- Quiz quality and answer evaluation depend on the selected model; tests verify
+  the harness, not educational correctness of live generated quizzes.
+- Reasoning summaries and token metadata depend on model/API availability.
+- Quiz artifacts are plain Markdown in the local workspace and remain available
+  for local inspection after the chat session ends.
+
 ### Next
 
 - Review the first experiment results and decide whether to expand the fixed

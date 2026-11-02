@@ -65,6 +65,10 @@ class Trajectory:
     def add(self, run: Run, step: Step) -> None:
         run.steps.append(step)
 
+    def clear(self) -> None:
+        """Clear execution history without changing conversation memory."""
+        self.runs.clear()
+
     def to_dict(self) -> dict:
         """Return JSON-serializable trajectory data."""
         return {
@@ -85,6 +89,10 @@ class Trajectory:
                             "latency_seconds": step.latency_seconds,
                             "answer": step.answer,
                             "reasoning": step.reasoning,
+                            "reasoning_status": (
+                                "Provider summary available" if step.reasoning
+                                else "No reasoning summary returned by API"
+                            ),
                             "metadata": step.metadata,
                             "error": step.error,
                         }
@@ -154,6 +162,9 @@ class LLM:
                 "model": result.model,
                 "input_tokens": usage.input_tokens if usage else None,
                 "output_tokens": usage.output_tokens if usage else None,
+                "prompt_tokens": usage.input_tokens if usage else None,
+                "completion_tokens": usage.output_tokens if usage else None,
+                "total_tokens": usage.total_tokens if usage else None,
                 "reasoning_tokens": details.reasoning_tokens if details else None,
             },
         )
@@ -179,15 +190,30 @@ class Memory:
 class TinyAgent:
     """Coordinate conversation memory and record each model call."""
 
-    def __init__(self, llm: LLM, memory: Memory):
+    def __init__(self, llm: LLM, memory: Memory, system_instructions=None):
         self.llm = llm
         self.memory = memory
         self.trajectory = Trajectory()
+        # Instruction sources are supplied per request and never enter Memory.
+        self.system_instructions = list(system_instructions or [])
 
-    def run(self, task: str, run_metadata: dict | None = None) -> Response:
+    def build_messages(self) -> list[dict]:
+        messages = [
+            {"role": "system", "content": text}
+            for text in self.system_instructions
+            if text and text.strip()
+        ]
+        messages.extend(message.copy() for message in self.memory.get_messages())
+        return messages
+
+    def run(self, task: str, run_metadata: dict | None = None, remember: bool = True) -> Response:
         run = self.trajectory.initialize(task, run_metadata)
-        self.memory.add("user", task)
-        messages = [message.copy() for message in self.memory.get_messages()]
+        messages = self.build_messages()
+        if remember:
+            self.memory.add("user", task)
+            messages = self.build_messages()
+        else:
+            messages.append({"role": "user", "content": task})
         started = time.perf_counter()
         try:
             response = self.llm.generate(messages)
@@ -222,5 +248,6 @@ class TinyAgent:
             ),
         )
         run.duration_seconds = round(elapsed, 4)
-        self.memory.add("assistant", response.content)
+        if remember:
+            self.memory.add("assistant", response.content)
         return response
