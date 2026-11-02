@@ -5,16 +5,22 @@ request. Leave a section blank or keep its placeholder if it does not apply.
 
 ## Technical background
 
-<!-- Add languages, tools, and topics you already know. -->
+- Python
+- Data Science
+- Regression and classification models
+- Systems modeling
+- Decision analysis
 
 ## Experience
 
-<!-- Add relevant work, projects, or learning experience. -->
+- Personalization of user experience for ecommerce web platforms in automotive industry
+- Development of systems models for environmental management contexts
 
 ## Learning objectives
 
-<!-- Add what you want to understand or build in this course. -->
+- Develop ability to design useful agentic applications for my data science role at Hartsfield-Jackson International Airport in Atlanta, GA USA
 
 ## Instructional preferences
 
-<!-- Add preferred pace, examples, level of detail, or feedback style. -->
+- I appreciate good examples
+- A medium level of detail
