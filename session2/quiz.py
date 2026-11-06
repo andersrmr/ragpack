@@ -97,7 +97,11 @@ class QuizManager:
             agent.system_instructions.append(self.skill_text)
         prompt = (f"The learner answered question {index + 1} of {len(self.quiz['questions'])}: "
                   f"{item['question']}\nExpected answer: {item['answer']}\nExplanation: {item['explanation']}\n"
-                  f"Learner answer: {answer}\nEvaluate fairly, explain briefly, and do not reveal future answers.")
+                  f"Learner answer: {answer}\n"
+                  "Return feedback on this answer only: say what is correct or missing and briefly explain why. "
+                  "Do not ask a question, repeat or rephrase this question, introduce or preview another question, "
+                  "or give an example phrased as a quiz question. Do not write a 'Question N' heading. "
+                  "The quiz harness will present the next question after your feedback. Stop after the feedback.")
         response = agent.run(prompt, run_metadata={"kind": "quiz_answer", "topic": self.quiz["topic"], "question": index + 1})
         # Keep learner-visible conversation in Memory; the fuller grading
         # instruction remains available in the trajectory request snapshot.

@@ -107,7 +107,12 @@ class QuizTests(unittest.TestCase):
             quiz = QuizManager(Path(directory))
             self.assertIn("Question 1 of 2", quiz.start(agent, "Memory"))
             self.assertTrue(quiz.active)
-            self.assertIn("What records runs?", quiz.answer(agent, "Memory"))
+            next_question = quiz.answer(agent, "Memory")
+            self.assertIn("What records runs?", next_question)
+            self.assertEqual(next_question.count("What records runs?"), 1)
+            grading_prompt = llm.requests[1][-1]["content"]
+            self.assertIn("Do not ask a question", grading_prompt)
+            self.assertIn("harness will present the next question", grading_prompt)
             self.assertIn("Quiz complete", quiz.answer(agent, "Trajectory"))
             artifact = Path(quiz.quiz["path"])
             saved = artifact.read_text(encoding="utf-8")
