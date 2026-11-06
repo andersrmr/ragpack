@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from context import PersistentContext
+from context import PersistentContext, SourceCodeContext, compose_instructions
 from quiz import QuizManager
 from tinyagent import LLM, Memory, Response, TinyAgent
 
@@ -60,6 +60,20 @@ class ContextTests(unittest.TestCase):
             path.write_text("  ", encoding="utf-8")
             context.reload()
             self.assertEqual(context.about_me, "")
+
+    def test_source_context_is_opt_in_and_reloadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tinyagent.py"
+            path.write_text("class TinyAgent: pass", encoding="utf-8")
+            source = SourceCodeContext(path)
+            self.assertFalse(source.instruction)
+            source.set_enabled(True)
+            self.assertIn("class TinyAgent", source.instruction)
+            path.write_text("class TinyAgent:\n    pass", encoding="utf-8")
+            source.reload()
+            self.assertIn("    pass", source.instruction)
+            source.set_enabled(False)
+            self.assertFalse(source.instruction)
 
 
 class ProviderTests(unittest.TestCase):
@@ -178,14 +192,25 @@ class GradioTests(unittest.TestCase):
         remaining, answer = session.send("Explain trajectory")
         self.assertEqual(remaining, "")
         self.assertIn("browser answer", answer)
+        session.set_source_enabled(True)
+        session.llm.replies.append("source aware answer")
+        session.send("What does the source say?")
+        request_system = [message["content"] for message in session.llm.requests[-1] if message["role"] == "system"]
+        self.assertTrue(any("Optional TinyAgent source code reference" in item for item in request_system))
+        session.set_source_enabled(False)
+        session.llm.replies.append("source free answer")
+        session.send("Ordinary question")
+        request_system = [message["content"] for message in session.llm.requests[-1] if message["role"] == "system"]
+        self.assertFalse(any("Optional TinyAgent source code reference" in item for item in request_system))
+        self.assertFalse(any("TinyAgent source code" in str(message) for message in session.memory.get_messages()))
         trajectory, context = session.snapshot()
         self.assertEqual(trajectory["runs"][0]["steps"][0]["answer"], "browser answer")
         self.assertIn("effective_messages_for_latest_run", context)
         session.memory.messages.clear()
-        self.assertEqual(len(session.snapshot()[0]["runs"]), 1)
+        self.assertEqual(len(session.snapshot()[0]["runs"]), 3)
         session.send("/clear")
         self.assertEqual(session.memory.messages, [])
-        self.assertEqual(len(session.snapshot()[0]["runs"]), 1)
+        self.assertEqual(len(session.snapshot()[0]["runs"]), 3)
         session.dispose()
 
         isolated = Sessions()

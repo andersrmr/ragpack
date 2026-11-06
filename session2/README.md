@@ -52,6 +52,14 @@ files are handled as empty personal context. Use Reload about_me.md in Gradio or
 `/context reload` in the terminal to apply edits without restarting. Clearing
 conversation memory leaves persistent instructions in effect.
 
+The Context tab also has an opt-in control for including the current
+`tinyagent.py` source in model requests. The terminal supports `/source on`,
+`/source off`, `/source status`, and `/source reload`. The file is supplied as a
+separate, clearly labeled system message and is never copied into conversation
+Memory. Reload after editing the source file. The Context view shows whether it
+is enabled and the exact source text being supplied. Including it increases
+prompt size and token use for each request while enabled.
+
 The quiz is a manually activated skill defined in `skills/quiz_me.md`. Use
 `/quiz` to use available course material or `/quiz <topic>` to select a topic.
 The user controls activation and deactivation; `/quiz end` returns to ordinary

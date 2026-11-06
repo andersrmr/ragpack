@@ -3,7 +3,7 @@
 import sys
 
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
-from context import PersistentContext
+from context import PersistentContext, SourceCodeContext, compose_instructions
 from quiz import QuizManager
 from rich.console import Console
 from rich.markdown import Markdown
@@ -11,10 +11,11 @@ from tinyagent import LLM, Memory, TinyAgent
 from transcripts import format_transcript, write_transcript
 
 
-def chat(agent, context, quiz):
+def chat(agent, context, quiz, source_context):
     console = Console()
     print(f"TinyAgent Session 2 | Model: {agent.llm.model}")
-    print("Commands: /clear, /save filename.md, /quiz [topic], /quiz end, /context reload, /quit\n")
+    print("Commands: /clear, /save filename.md, /quiz [topic], /quiz end, /context reload, ")
+    print("/source on|off|status|reload, /quit\n")
     while True:
         text = input("You: ").strip()
         if not text:
@@ -38,8 +39,24 @@ def chat(agent, context, quiz):
             continue
         if text == "/context reload":
             context.reload()
-            agent.system_instructions[0] = context.system_message
+            compose_instructions(agent, context, source_context, quiz)
             print("Persistent context reloaded.\n")
+            continue
+        if text in {"/source on", "/source off", "/source status", "/source reload"}:
+            if text == "/source on":
+                source_context.set_enabled(True)
+                message = ("TinyAgent source code will be included in model requests." if source_context.source
+                           else source_context.error)
+            elif text == "/source off":
+                source_context.set_enabled(False)
+                message = "TinyAgent source code is no longer included in model requests."
+            elif text == "/source reload":
+                source_context.reload()
+                message = "TinyAgent source code reloaded."
+            else:
+                message = "TinyAgent source context is " + ("on." if source_context.enabled else "off.")
+            compose_instructions(agent, context, source_context, quiz)
+            print(message, "\n")
             continue
         if text == "/quiz end":
             print(quiz.end(agent), "\n")
@@ -54,10 +71,7 @@ def chat(agent, context, quiz):
                 print(f"Could not start quiz: {error}\n", file=sys.stderr)
             continue
 
-        instructions = [context.system_message]
-        if quiz.active and quiz.skill_text not in agent.system_instructions:
-            instructions.append(quiz.skill_text)
-        agent.system_instructions = instructions
+        compose_instructions(agent, context, source_context, quiz)
         history_length = len(agent.memory.messages)
         try:
             if quiz.active:
@@ -89,9 +103,10 @@ def main() -> int:
     llm = None
     try:
         context = PersistentContext()
+        source_context = SourceCodeContext()
         llm = LLM()
         agent = TinyAgent(llm, Memory(), [context.system_message])
-        chat(agent, context, QuizManager())
+        chat(agent, context, QuizManager(), source_context)
     except (ValueError, KeyboardInterrupt, EOFError) as error:
         if isinstance(error, ValueError):
             print(f"Configuration error: {error}", file=sys.stderr)

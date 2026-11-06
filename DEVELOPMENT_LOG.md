@@ -82,6 +82,19 @@ support.
 - Quiz artifacts are plain Markdown in the local workspace and remain available
   for local inspection after the chat session ends.
 
+## Session 2 — Optional agent source context (2026-11-05)
+
+- Added an opt-in source context that loads only `session2/tinyagent.py` and
+  supplies it as a labeled system message while enabled. It stays out of
+  conversation Memory.
+- Added a Context tab checkbox and reload button, plus terminal `/source on`,
+  `/source off`, `/source status`, and `/source reload` commands. The Context
+  view shows whether the source is active and the content supplied.
+- Added offline checks for opt-in behavior, reload after edits, removal when
+  disabled, and inclusion in effective model messages.
+- Validation: 9 Session 2 offline tests passed; Python compilation and
+  `git diff --check` passed. No live API calls were made.
+
 ### Next
 
 - Review the first experiment results and decide whether to expand the fixed

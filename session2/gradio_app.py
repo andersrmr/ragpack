@@ -8,7 +8,7 @@ from threading import RLock
 
 import gradio as gr
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
-from context import PersistentContext
+from context import PersistentContext, SourceCodeContext, compose_instructions
 from quiz import QuizManager
 from tinyagent import LLM, Memory, TinyAgent
 from transcripts import format_transcript, write_transcript
@@ -17,6 +17,7 @@ from transcripts import format_transcript, write_transcript
 class ChatSession:
     def __init__(self):
         self.context = PersistentContext()
+        self.source_context = SourceCodeContext()
         self.memory = Memory()
         self.quiz = QuizManager()
         self.llm = None
@@ -38,6 +39,7 @@ class ChatSession:
         latest = trajectory["runs"][-1]["steps"][-1] if trajectory["runs"] and trajectory["runs"][-1]["steps"] else None
         return trajectory, {
             "persistent_sources": self.context.sources,
+            "source_code_context": self.source_context.view,
             "active_skill": self.quiz.skill_text if self.quiz.active else "",
             "conversation_memory": self.memory.get_messages(),
             "effective_messages_for_latest_run": latest["input_messages"] if latest else [],
@@ -47,7 +49,21 @@ class ChatSession:
     def status(self):
         model = self.llm.model if self.llm else (os.environ.get("TINYAGENT_MODEL", "not configured"))
         mode = f"Quiz active: {self.quiz.quiz['topic']}" if self.quiz.active else "Ordinary tutoring"
+        if self.source_context.enabled:
+            mode += " | TinyAgent source included" if self.source_context.source else " | TinyAgent source unavailable"
         return f"Model: {model} | {mode}"
+
+    def set_source_enabled(self, enabled):
+        with self.lock:
+            self.source_context.set_enabled(enabled)
+            if self.agent:
+                compose_instructions(self.agent, self.context, self.source_context, self.quiz)
+
+    def reload_source(self):
+        with self.lock:
+            self.source_context.reload()
+            if self.agent:
+                compose_instructions(self.agent, self.context, self.source_context, self.quiz)
 
     def send(self, text):
         with self.lock:
@@ -58,6 +74,7 @@ class ChatSession:
                 return text, "Enter a message."
             try:
                 self.ensure_agent()
+                compose_instructions(self.agent, self.context, self.source_context, self.quiz)
                 history_length = len(self.memory.messages)
                 if text == "/quiz end":
                     answer = self.quiz.end(self.agent)
@@ -65,8 +82,20 @@ class ChatSession:
                     answer = self.quiz.start(self.agent, text.partition(" ")[2])
                 elif text == "/context reload":
                     self.context.reload()
-                    self.agent.system_instructions[0] = self.context.system_message
+                    compose_instructions(self.agent, self.context, self.source_context, self.quiz)
                     answer = "Persistent context reloaded from `about_me.md`."
+                elif text == "/source on":
+                    self.set_source_enabled(True)
+                    answer = ("TinyAgent source code will be included in model requests." if self.source_context.source
+                              else self.source_context.error)
+                elif text == "/source off":
+                    self.set_source_enabled(False)
+                    answer = "TinyAgent source code is no longer included in model requests."
+                elif text == "/source reload":
+                    self.reload_source()
+                    answer = "TinyAgent source code reloaded."
+                elif text == "/source status":
+                    answer = "TinyAgent source context is " + ("on." if self.source_context.enabled else "off.")
                 elif text == "/clear":
                     self.memory.messages.clear()
                     answer = "Conversation cleared. Persistent context and trajectory retained."
@@ -90,7 +119,7 @@ class ChatSession:
                 else:
                     detail = "Unexpected request error."
                 return text, f"{detail} Previous conversation kept; you can retry."
-            if text == "/quiz" or text.startswith("/quiz "):
+            if text == "/quiz" or text.startswith("/quiz ") or text.startswith("/source "):
                 self.memory.add("user", text)
                 self.memory.add("assistant", answer)
             return "", answer
@@ -149,7 +178,7 @@ def build_app():
         session = current(request)
         remaining, answer = session.send(text)
         trajectory, context = session.snapshot()
-        return remaining, session.history(), session.status(), trajectory, context
+        return remaining, session.history(), session.status(), trajectory, context, session.source_context.enabled
 
     def activate_quiz(topic, request: gr.Request):
         return update("/quiz " + (topic or ""), request)
@@ -167,9 +196,21 @@ def build_app():
         session = current(request)
         session.context.reload()
         if session.agent:
-            session.agent.system_instructions[0] = session.context.system_message
+            compose_instructions(session.agent, session.context, session.source_context, session.quiz)
         trajectory, context = session.snapshot()
         return "Persistent context reloaded from `about_me.md`.", context, session.status()
+
+    def set_source(enabled, request: gr.Request):
+        session = current(request)
+        session.set_source_enabled(enabled)
+        _, context = session.snapshot()
+        return context, session.status()
+
+    def reload_source(request: gr.Request):
+        session = current(request)
+        session.reload_source()
+        _, context = session.snapshot()
+        return context, session.status()
 
     def clear_trajectory(request: gr.Request):
         session = current(request)
@@ -217,16 +258,20 @@ def build_app():
                 trajectory_clear = gr.Button("Clear trajectory")
             with gr.Tab("Context"):
                 gr.Markdown("Persistent instructions and active skill are separate from Memory. Effective messages show the last recorded model request.")
+                source_toggle = gr.Checkbox(label="Include session2/tinyagent.py in model requests (adds source tokens)", value=False)
+                source_reload = gr.Button("Reload tinyagent.py")
                 context_view = gr.JSON(label="Context sources and latest effective request")
 
-        outputs = [question, conversation, status, trajectory_view, context_view]
+        outputs = [question, conversation, status, trajectory_view, context_view, source_toggle]
         options = {"concurrency_id": "session2-actions", "concurrency_limit": 1}
         def load(request: gr.Request):
             session = current(request)
             trajectory, context = session.snapshot()
-            return session.status(), trajectory, context
+            return session.status(), trajectory, context, session.source_context.enabled
 
-        app.load(load, outputs=[status, trajectory_view, context_view], **options)
+        app.load(load, outputs=[status, trajectory_view, context_view, source_toggle], **options)
+        source_toggle.change(set_source, inputs=[source_toggle], outputs=[context_view, status], **options)
+        source_reload.click(reload_source, outputs=[context_view, status], **options)
         trajectory_clear.click(clear_trajectory, outputs=[trajectory_view], **options)
         send.click(update, inputs=[question], outputs=outputs, **options)
         question.submit(update, inputs=[question], outputs=outputs, **options)
