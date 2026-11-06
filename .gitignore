@@ -12,6 +12,7 @@ venv/
 env/
 session2/.venv/
 session2/results/
+session2/quizzes/
 
 # Local environment variables and credentials
 .env
