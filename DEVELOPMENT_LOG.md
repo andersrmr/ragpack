@@ -1,5 +1,51 @@
 # TinyAgent Development Log
 
+## Session 3 — Native tool calling, Stage A (2026-11-07)
+
+- Created an independent `session3/` implementation by adapting Session 2's
+  context, manually controlled quiz, transcripts, and Gradio/terminal patterns.
+  Session 1 and Session 2 source files were left unchanged. The inspected
+  checkout did not contain a repository-root `README.md`; Session 3 setup and
+  architecture are documented in `session3/README.md`.
+- Added Responses API function tool schemas, parsing of `function_call` output
+  items, and correlated `function_call_output` items using provider `call_id`s.
+  Provider reasoning summaries and token usage remain available, while hidden
+  reasoning is neither requested as chain-of-thought nor synthesized.
+- Added allowlisted `NativeTools` with schema/argument validation and the
+  `multiply(a, b)` and explicitly simulated `get_weather(location)` examples.
+  Invalid JSON, unsupported names, bad arguments, and execution exceptions
+  become visible observations and trajectory errors. Parallel function calls
+  are disabled at the request; a returned multi-call batch is retained and
+  visibly rejected without executing any function.
+- Extended Memory with distinct Responses API call/output items and Trajectory
+  with model-request, answer, action, observation, error, latency, and usage
+  data. Tool execution pauses. Terminal `/continue` and Gradio Continue each
+  make one model request; clearing Memory cancels pending continuation.
+- Adapted both interfaces and carried forward reloadable `about_me.md`, opt-in
+  Session 3 source context, manual quiz skills/artifacts, transcript export,
+  reasoning effort, session-local Gradio state, and Chat/Context/Trajectory
+  tabs. The browser transcript shows each action and its resulting observation.
+- Added offline protocol, one-action, Continue, validation/error, multi-call,
+  clear-state, and UI tests. No live API calls were made.
+
+### Validation
+
+- Session 3: **15 tests passed**; `compileall` completed; `git diff --check`
+  passed. Gradio construction and fake session flow were exercised.
+- Session 2 regression: **9 tests passed**.
+- Session 1 regression: **28 tests passed**. Its existing suite emitted one
+  `ResourceWarning` about an unclosed asyncio event loop while tests passed.
+- No live browser session or OpenAI account/model compatibility was tested.
+
+### Scope and follow-up
+
+- Stage A only: no autonomous loop, embeddings, RAG, compaction, retrieval,
+  progressive skill discovery, video search, or MCP support.
+- Useful manual experiment: ask for `5.1 × 7.3`, inspect the single multiply
+  action and observation in Trajectory, press Continue once, and confirm the
+  model's final response uses `37.23`. Repeat with a weather request to see the
+  simulated label and try malformed/unsupported requests through a mocked test.
+
 ## Session 2 — Reasoning comparison (started 2026-10-21)
 
 Session 1 remains the reproducible checkpoint in `session1/`. Session 2 starts
