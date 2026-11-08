@@ -11,8 +11,11 @@ __pycache__/
 venv/
 env/
 session2/.venv/
+
+# Session specifics
 session2/results/
 session2/quizzes/
+course_materials/
 
 # Local environment variables and credentials
 .env
