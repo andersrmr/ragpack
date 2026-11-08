@@ -79,6 +79,15 @@ context loads `session3/tinyagent.py`. Quiz progress and Markdown artifacts,
 conversation clearing, transcript export, reasoning-effort configuration, and
 the Chat, Context, and Trajectory tabs are retained from Session 2.
 
+To reference the implementation from Gradio, open the **Context** tab and turn
+on **Include session3/tinyagent.py in model requests**. The source is off by
+default. When enabled, it is added to future model requests as context; it is
+not displayed as a code viewer in the Chat tab. The Context tab's JSON view
+shows the loaded text under `source_code_context.content` and the latest
+effective request under `effective_messages_for_latest_run`. Use **Reload
+tinyagent.py** after editing the file. You can also use `/source on`,
+`/source off`, `/source status`, and `/source reload` in the Gradio chat box.
+
 Clearing conversation also cancels any pending Continue state. Clearing the
 diagnostic trajectory does not change Memory. The Gradio app keeps agents and
 their state isolated by browser session.
