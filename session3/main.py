@@ -8,14 +8,16 @@ from quiz import QuizManager
 from rich.console import Console
 from rich.markdown import Markdown
 from tinyagent import LLM, Memory, NativeTools, TinyAgent
+from retrieval import EmbeddingModel, RAGMemory
 from transcripts import format_transcript, write_transcript
 
 
 def chat(agent, context, quiz, source_context):
     console = Console()
     print(f"TinyAgent Session 3 | Model: {agent.llm.model}")
-    print("Commands: /continue, /clear, /save filename.md, /quiz [topic], /quiz end, /context reload, ")
-    print("/source on|off|status|reload, /quit\n")
+    print(f"Retrieval mode: {agent.retrieval_mode}")
+    print("Commands: /continue, /compact [retain_turns], /retrieval off|automatic|directed, /clear, /save filename.md,")
+    print("/quiz [topic], /quiz end, /context reload, /source on|off|status|reload, /quit\n")
     while True:
         text = input("You: ").strip()
         if not text:
@@ -23,10 +25,31 @@ def chat(agent, context, quiz, source_context):
         if text == "/quit":
             break
         if text == "/clear":
-            agent.memory.messages.clear()
+            agent.memory.clear()
             agent.pending_continue = False
             agent.active_run = None
             print("Conversation cleared; persistent context and trajectory retained.\n")
+            continue
+        if text.startswith("/retrieval "):
+            mode = {"off": "Off", "automatic": "Automatic RAG",
+                    "directed": "Model-directed retrieval"}.get(text.partition(" ")[2].strip().lower())
+            if mode is None:
+                print("Usage: /retrieval off|automatic|directed\n")
+            else:
+                try:
+                    agent.set_retrieval_mode(mode)
+                    print(f"Retrieval mode: {mode}\n")
+                except (RuntimeError, ValueError) as error:
+                    print(f"Could not select retrieval mode: {error}\n", file=sys.stderr)
+            continue
+        if text == "/compact" or text.startswith("/compact "):
+            raw = text.partition(" ")[2].strip()
+            try:
+                retained = int(raw) if raw else 2
+                result = agent.compact_memory(retained)
+                print(f"Memory compacted; retained {retained} complete recent turns.\n{result['summary']}\n")
+            except (ValueError, RuntimeError) as error:
+                print(f"Could not compact Memory: {error}\n", file=sys.stderr)
             continue
         if text == "/continue":
             try:
@@ -130,7 +153,8 @@ def main() -> int:
         context = PersistentContext()
         source_context = SourceCodeContext()
         llm = LLM()
-        agent = TinyAgent(llm, Memory(), [context.system_message], NativeTools())
+        rag = RAGMemory(embedding_model=EmbeddingModel(llm.client))
+        agent = TinyAgent(llm, Memory(), [context.system_message], NativeTools(), rag)
         chat(agent, context, QuizManager(), source_context)
     except (ValueError, KeyboardInterrupt, EOFError) as error:
         if isinstance(error, ValueError):

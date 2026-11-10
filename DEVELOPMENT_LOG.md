@@ -46,6 +46,63 @@
   model's final response uses `37.23`. Repeat with a weather request to see the
   simulated label and try malformed/unsupported requests through a mocked test.
 
+## Session 3 — Retrieval and compaction, Stage B (2026-11-10)
+
+- Added `EmbeddingModel` and `RAGMemory` in `session3/retrieval.py`. Both
+  interfaces pass the existing OpenAI SDK chat client to the embeddings
+  endpoint. The installed SDK was 2.54.0; `requirements.txt` permits
+  `openai>=1.66,<3`. The configurable default embedding model is
+  `text-embedding-3-small`, separate from `TINYAGENT_MODEL`.
+- Added a local Markdown collection with stable IDs, provenance, and one fact
+  per passage. Unlike the initial Stage B assumption, the repository's
+  `course_materials/session_3_memory_and_tools.py` contains the Session 3
+  source facts. It says Ilse is a software engineer at a renewable energy
+  startup and does not state her languages; it says Sarah speaks fluent
+  Spanish and Portuguese. The corpus uses those source facts and includes a
+  clearly labeled synthetic curator note describing the missing Ilse language
+  fact. This makes the expected distinction explicit: context-free follow-up
+  retrieval may return Sarah's language fact, while an Ilse-directed query has
+  no source fact establishing Ilse's languages.
+- Added cosine similarity, configurable top-k/threshold, graceful empty/error
+  handling, and a local cache keyed by document content and embedding-model
+  identity. The ignored cache is rebuildable with
+  `python retrieval.py --rebuild-cache` from `session3/`.
+- Added Off, Automatic RAG, and Model-directed retrieval modes. Automatic RAG
+  uses only the latest user turn, injects labeled temporary request context
+  once, and records query, scores, result IDs, threshold decision, and errors.
+  Model-directed mode conditionally exposes `search_documents`; its call and
+  correlated output remain in Memory and Trajectory and wait for explicit
+  Continue. No query-rewriting call or autonomous tool loop was added.
+- Added explicit `CompactMemory` operation with a dedicated tool-free
+  Responses API request, safe complete-turn boundaries, separate summary,
+  retained recent turns, failure recovery, retained transcript history, and
+  available usage metadata. Added matching terminal and Gradio controls and
+  retrieval/compaction observability.
+- Updated `session3/tinyagent.py`, `retrieval.py`, both interfaces,
+  `transcripts.py`, `session3/README.md`, and `.gitignore`. Added course-derived
+  corpus files and `session3/test_session3_stage_b.py`. Session 1 and Session 2
+  sources and package dependencies were unchanged.
+
+### Validation
+
+- Session 3: **26 offline tests passed**, including SDK request shapes with
+  fakes, fixture evidence expectations, cache/ranking behavior, retrieval mode
+  and Continue semantics, UI/session observability, and compaction boundaries.
+- Session 1: **28 tests passed**; Session 2: **9 tests passed**. The existing
+  Session 1 asyncio event-loop `ResourceWarning` still appears while its suite
+  passes.
+- `compileall` and `git diff --check` passed. No live API requests or model
+  answer quality evaluation was performed.
+
+### Limitations and deferred work
+
+The course does not provide an Ilse language fact; the synthetic note makes
+that absence searchable without inventing an answer. Automatic RAG intentionally
+uses the latest message verbatim and may retrieve Sarah's language fact for an
+ambiguous follow-up. Model-directed search depends on model query quality.
+Query rewriting, hosted vector databases, autonomous tool loops, progressive
+skill discovery, video search, MCP, and Session 4 work remain deferred.
+
 ## Session 2 — Reasoning comparison (started 2026-10-21)
 
 Session 1 remains the reproducible checkpoint in `session1/`. Session 2 starts

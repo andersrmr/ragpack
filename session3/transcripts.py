@@ -6,7 +6,8 @@ from pathlib import Path
 
 
 def format_transcript(memory) -> str:
-    messages = [m for m in memory.get_messages() if m.get("role") in {"user", "assistant"}]
+    source = memory.transcript_messages() if hasattr(memory, "transcript_messages") else memory.get_messages()
+    messages = [m for m in source if m.get("role") in {"user", "assistant"}]
     if not messages:
         return ""
     blocks = ["# TinyAgent conversation"]

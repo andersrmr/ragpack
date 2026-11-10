@@ -1,96 +1,145 @@
-# TinyAgent Session 3: Native Tool Calling
+# TinyAgent Session 3: Native Tools, Retrieval, and Memory
 
-Session 3 is a separate checkpoint based on Session 2. It preserves the OpenAI
-Python SDK and Responses API integration while adding native function calling,
-an allowlisted `NativeTools` registry, and one-action-per-step control flow.
-Session 1 and Session 2 remain independent and were not modified. The current
-repository checkout has no root `README.md`; setup conventions are consistent
-with `session1/README.md` and `session2/README.md`.
+Session 3 is an independent checkpoint based on Session 2. Stage A added native
+Responses API function calling with one action per step. Stage B adds a small
+local document retriever, two retrieval policies, and explicit conversation
+compaction. Session 1 and Session 2 source files remain unchanged.
 
 ## Setup and launch
 
-Install the terminal dependencies from the repository root:
+Install terminal dependencies from the repository root:
 
 ```bash
 python -m pip install -r session3/requirements.txt
 ```
 
-For the optional browser interface:
+For Gradio, also install:
 
 ```bash
 python -m pip install -r session3/requirements-gradio.txt
 ```
 
-Set `OPENAI_API_KEY` and `TINYAGENT_MODEL` in the environment. From the
-repository root, launch the terminal app with:
+Set `OPENAI_API_KEY` and `TINYAGENT_MODEL`. From the repository root, launch
+the terminal app with:
 
 ```bash
 cd session3
 python main.py
 ```
 
-Launch Gradio with `python gradio_app.py` from `session3/`. It binds to
-localhost. Terminal and browser interfaces use the same `TinyAgent` core.
+Launch the browser interface from `session3/` with `python gradio_app.py`. It
+binds to localhost. Both interfaces use the same `TinyAgent` core. Retrieval
+uses the same OpenAI SDK client as chat; the SDK request is
+`client.embeddings.create(model=..., input=[...])`. The checked environment used
+OpenAI Python SDK 2.54.0; `requirements.txt` allows versions `>=1.66,<3`.
 
-Terminal commands include `/continue`, `/clear`, `/save filename.md`,
-`/context reload`, `/source on|off|status|reload`, `/quiz [topic]`, and
-`/quiz end`. A tool step pauses after one execution. `/continue` makes exactly
-one subsequent model request. A final answer ends that pending interaction.
-Gradio's Continue button is enabled only while a tool call is waiting for the
-next step.
+## Retrieval configuration and corpus
 
-## Responses API tool protocol
+`retrieval.py` provides `EmbeddingModel` and `RAGMemory`. The local Markdown
+corpus is under `documents/`. Each file has YAML-like front matter containing
+stable `id`, `title`, and `source` fields, followed by passage text. Only those
+files are loaded; the repository, `about_me.md`, transcripts, and arbitrary
+user files are not scanned.
 
-The LLM sends function tool schemas using the Responses API format: each tool
-has `type: "function"`, a top-level `name`, `description`, and JSON Schema
-`parameters`. A model request can return a `function_call` output item containing
-its item `id`, `call_id`, function `name`, and JSON `arguments`. TinyAgent stores
-that item in Memory, checks the allowlisted registry and validates arguments,
-then executes one Python function. It appends a
-`function_call_output` item with the same `call_id` and the visible result or
-error. Continue sends this accumulated input back to the model. No automatic
-follow-up model request occurs after a tool execution. Parallel tool calls are
-disabled in the request. If a provider response still contains multiple calls,
-the harness retains each item, pairs each with a visible rejection output, and
-does not execute a batch.
+The fact passages are adapted from the repository course source,
+`course_materials/session_3_memory_and_tools.py`, section 2.3. The source says
+Ilse is a software engineer at a renewable energy startup and lists her
+residence and interests. It does not state which languages Ilse speaks. The
+same source says Sarah speaks fluent Spanish and Portuguese. A clearly labeled
+synthetic curator note records that absence so retrieval does not turn it into
+a claim about Ilse.
 
-Two demonstration tools are registered: `multiply(a, b)` and
-`get_weather(location)`. The weather result is explicitly simulated and does
-not represent a live weather observation. Malformed JSON, unsupported names,
-argument validation errors, and Python execution errors are returned as visible
-tool observations, with diagnostic details in Trajectory.
+Settings:
 
-## Architecture and state
+- `TINYAGENT_EMBEDDING_MODEL` defaults to `text-embedding-3-small` and is
+  separate from `TINYAGENT_MODEL`.
+- `TINYAGENT_RETRIEVAL_TOP_K` defaults to `3`.
+- `TINYAGENT_RETRIEVAL_THRESHOLD` defaults to cosine similarity `0.30`.
+- The local embedding cache is `session3/.cache/embeddings.json`, ignored by
+  Git. Cache keys include the embedding model identity and a hash of document
+  text. Changed content or model identity is embedded again; stale vectors are
+  removed when the cache is refreshed.
+- To inspect settings or rebuild all current document embeddings, run from
+  `session3/`: `python retrieval.py --rebuild-cache`. This requires the API key
+  and may make embedding requests. Empty corpora and no matches return no
+  passages; API and cache errors are visible in Context or tool observations.
 
-- **Tools** are registered Python functions selected by model-generated calls.
-  Only registered functions can execute.
-- **Skills** are instruction text under `skills/`. The quiz skill remains
-  manually activated and orchestrated by the quiz UI/commands; it is not a
-  native model-directed tool.
-- **Memory** stores conversational messages and Responses API function-call and
-  function-output items. Persistent system instructions remain separate.
-- **Trajectory** records model requests, answers, tool actions, arguments,
-  observations, errors, latency, and available usage. Provider reasoning
-  summaries are recorded only when returned; hidden chain-of-thought is never
-  requested or fabricated.
+## Retrieval modes and the Ilse comparison
 
-`about_me.md` remains persistent and reloadable. Optional TinyAgent source
-context loads `session3/tinyagent.py`. Quiz progress and Markdown artifacts,
-conversation clearing, transcript export, reasoning-effort configuration, and
-the Chat, Context, and Trajectory tabs are retained from Session 2.
+Select a mode in the Gradio Chat tab. In the terminal, use
+`/retrieval off`, `/retrieval automatic`, or `/retrieval directed`. The selected
+mode is shown in the Gradio status and Context view and reported after each
+terminal mode command.
 
-To reference the implementation from Gradio, open the **Context** tab and turn
-on **Include session3/tinyagent.py in model requests**. The source is off by
-default. When enabled, it is added to future model requests as context; it is
-not displayed as a code viewer in the Chat tab. The Context tab's JSON view
-shows the loaded text under `source_code_context.content` and the latest
-effective request under `effective_messages_for_latest_run`. Use **Reload
-tinyagent.py** after editing the file. You can also use `/source on`,
-`/source off`, `/source status`, and `/source reload` in the Gradio chat box.
+- **Off** performs no retrieval or embedding request. The existing Stage A
+  demonstration tools remain available.
+- **Automatic RAG** embeds and searches using only the latest user turn, once at
+  the start of that turn. Accepted matches are added to that one effective
+  model request as labeled temporary developer context. They are not inserted
+  into conversation Memory and are not repeated on Continue. If no passage
+  clears the threshold, the request says no relevant local passage was
+  retrieved.
+- **Model-directed retrieval** exposes `search_documents(query, top_k)` as an
+  allowlisted Responses API function tool. The model decides whether to call it
+  and supplies its query. The harness searches the same corpus, returns
+  source-labeled matches with scores, records the function call/output items,
+  and pauses. Continue makes exactly one next model request. It may answer or
+  request another single tool action, which again waits for Continue.
 
-Clearing conversation also cancels any pending Continue state. Clearing the
-diagnostic trajectory does not change Memory. The Gradio app keeps agents and
-their state isolated by browser session.
+Run the sequence once in Automatic RAG:
+
+1. `What does Ilse do for work?`
+2. `Does she speak any languages?`
+
+Then clear the conversation, choose Model-directed retrieval, and repeat both
+questions. Automatic RAG searches the follow-up wording alone; the course
+example shows that it can retrieve Sarah's Spanish/Portuguese fact for “she.”
+In the directed run, the model can use the conversation to query for “Ilse's
+languages” (the actual query is visible in the function arguments). The source
+has no language fact for Ilse, so the expected relevant evidence is the labeled
+note that the source is silent; neither retrieval mode should infer a language
+for her. Model query formulation and scores can vary, and offline tests use
+fixed vectors to verify these evidence expectations. Query rewriting is not
+silently added to either mode; it remains a separate possible experiment.
+
+The Context tab shows the selected mode, top-k and threshold, latest automatic
+query/matches/scores/threshold decision, exact temporary context in the latest
+effective request, model-directed tool schema/action/observation, and compacted
+summary boundary. Trajectory stores structured automatic retrieval events,
+model requests, tool actions and observations, answers, and compaction events.
+The Chat view renders model-directed actions and observations.
+
+## Compacting conversation Memory
+
+Compaction is explicit and only works at a safe turn boundary. In the terminal,
+run `/compact` (retains the two most recent complete turns) or
+`/compact 3`. In Gradio, set “Recent turns to retain” and choose “Compact
+Memory”. Compaction makes a separate, tool-free Responses API summarization
+request using only older complete conversation turns. On success, Memory holds
+the summary separately plus the retained complete turns. A tool call/output
+pair is kept together; unresolved tool state blocks compaction. On failure,
+working Memory is unchanged and the error is shown.
+
+Original transcript export history remains available after compaction, while
+the effective request uses the compacted summary and retained turns. Clear
+conversation removes the summary and compacted working state but preserves
+`about_me.md`, source context, and Trajectory. Clearing Trajectory does not
+change Memory. Summarization usage is recorded in the compaction Trajectory
+event when the Responses API returns it (`input_tokens`, `output_tokens`,
+`total_tokens`, and model); the request does not store credentials or hidden
+reasoning.
+
+## Preserved Stage A behavior
+
+Responses API function calls and matching `function_call_output` items preserve
+the provider `call_id`. `NativeTools` validates allowlisted calls and records
+errors as observations. Only one tool action executes per step; terminal
+`/continue` and the Gradio Continue button each make exactly one model request.
+Memory and Trajectory remain separate. Persistent `about_me.md`, optional
+reloadable source context, manually activated `skills/quiz_me.md`, quiz
+commands/artifacts, transcript export, independent clearing, and session-local
+Gradio agents remain in place. Persistent instructions, personal context,
+skills, retrieval results, conversation Memory, and Trajectory remain distinct.
 
 ## Offline tests
 
@@ -100,22 +149,26 @@ Run Session 3 tests from the repository root:
 python -m unittest discover -s session3 -p 'test_*.py' -v
 ```
 
-Run regression suites for the earlier checkpoints:
+Run the earlier regression suites:
 
 ```bash
 python -m unittest discover -s session1 -p 'test_*.py' -v
 python -m unittest discover -s session2 -p 'test_*.py' -v
 ```
 
-Tests use fake Responses API results and do not call OpenAI. Gradio construction
-checks run when the optional dependency is installed.
+Tests use fake embedding vectors, fake Responses API results, and mocks. They do
+not require credentials or make live embedding/chat calls. Gradio session
+construction checks run when its optional dependency is installed.
 
-## Scope and limitations
+## Stage B limitations and deferred work
 
-This is Stage A. There is no autonomous agent loop, embeddings, RAG memory,
-compaction, vector store, model-directed document retrieval, progressive skill
-discovery, video search, or MCP integration. Tool execution is synchronous and
-local. The provider/model may refuse a tool request or return output that the
-harness visibly rejects. Live model behavior and actual account/model schema
-compatibility require a manual experiment; no live API calls are part of the
-offline validation.
+This is a small in-process cosine-similarity demonstration over ten short
+course-source fact passages and one synthetic curator note. Retrieval quality
+depends on the selected embedding model, small corpus, and fixed threshold.
+Automatic RAG intentionally uses the latest turn verbatim and can miss
+context-dependent follow-ups. Model-directed retrieval depends on the model
+choosing a useful query. No hosted vector
+database, automatic query-rewriting call, autonomous tool loop, progressive
+skill discovery, video search, MCP, or coding-agent challenge is implemented.
+Those remain outside Stage B; live account/model compatibility and answer
+quality require a manual experiment.

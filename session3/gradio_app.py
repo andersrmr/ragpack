@@ -11,6 +11,7 @@ from openai import APIConnectionError, APIError, APIStatusError, AuthenticationE
 from context import PersistentContext, SourceCodeContext, compose_instructions
 from quiz import QuizManager
 from tinyagent import LLM, Memory, NativeTools, TinyAgent
+from retrieval import EmbeddingModel, RAGMemory
 from transcripts import format_transcript, write_transcript
 
 
@@ -25,11 +26,15 @@ class ChatSession:
         self.ended = False
         self.downloads = None
         self.lock = RLock()
+        self.retrieval_mode = "Off"
+        self.rag_memory = None
 
     def ensure_agent(self):
         if self.agent is None:
             self.llm = LLM()
-            self.agent = TinyAgent(self.llm, self.memory, [self.context.system_message], NativeTools())
+            self.rag_memory = RAGMemory(embedding_model=EmbeddingModel(self.llm.client))
+            self.agent = TinyAgent(self.llm, self.memory, [self.context.system_message], NativeTools(), self.rag_memory)
+            self.agent.set_retrieval_mode(self.retrieval_mode)
 
     def history(self):
         displayed, actions = [], {}
@@ -55,6 +60,12 @@ class ChatSession:
     def snapshot(self):
         trajectory = self.agent.trajectory.to_dict() if self.agent else {"schema_version": 1, "runs": []}
         latest = trajectory["runs"][-1]["steps"][-1] if trajectory["runs"] and trajectory["runs"][-1]["steps"] else None
+        latest_run = trajectory["runs"][-1] if trajectory["runs"] else None
+        latest_turn_items = []
+        for index in range(len(self.memory.messages) - 1, -1, -1):
+            if self.memory.messages[index].get("role") == "user":
+                latest_turn_items = self.memory.messages[index:]
+                break
         return trajectory, {
             "persistent_sources": self.context.sources,
             "source_code_context": self.source_context.view,
@@ -62,11 +73,23 @@ class ChatSession:
             "conversation_memory": self.memory.get_messages(),
             "effective_messages_for_latest_run": latest["input_messages"] if latest else [],
             "latest_run_metadata": (trajectory["runs"][-1] if trajectory["runs"] else None),
+            "retrieval": {"selected_mode": self.retrieval_mode,
+                          "top_k": self.rag_memory.top_k if self.rag_memory else 3,
+                          "similarity_threshold": self.rag_memory.threshold if self.rag_memory else 0.30,
+                          "corpus_load_errors": self.rag_memory.corpus_errors if self.rag_memory else [],
+                          "latest_automatic_result": (latest_run or {}).get("metadata", {}).get("automatic_retrieval"),
+                          "temporary_context_added": bool(latest_run and latest_run.get("metadata", {}).get("automatic_retrieval")),
+                          "latest_summary": self.memory.summary,
+                          "retained_turn_boundary": self.memory.summary_retained_turns,
+                          "model_directed_tool_schema": next((s for s in self.agent.tools.schemas if s["name"] == "search_documents"), None) if self.agent and self.retrieval_mode == "Model-directed retrieval" else None,
+                          "latest_model_directed_actions": [step for step in ((latest_run or {}).get("steps", [])) if (step.get("action") or {}).get("tool") == "search_documents"],
+                          "latest_model_directed_items": [item for item in latest_turn_items if item.get("type") in {"function_call", "function_call_output"}]},
         }
 
     def status(self):
         model = self.llm.model if self.llm else (os.environ.get("TINYAGENT_MODEL", "not configured"))
         mode = f"Quiz active: {self.quiz.quiz['topic']}" if self.quiz.active else "Ordinary tutoring"
+        mode += f" | Retrieval: {self.retrieval_mode}"
         if self.source_context.enabled:
             mode += " | TinyAgent source included" if self.source_context.source else " | TinyAgent source unavailable"
         return f"Model: {model} | {mode}"
@@ -76,6 +99,14 @@ class ChatSession:
             self.source_context.set_enabled(enabled)
             if self.agent:
                 compose_instructions(self.agent, self.context, self.source_context, self.quiz)
+
+    def set_retrieval_mode(self, mode):
+        with self.lock:
+            if mode not in {"Off", "Automatic RAG", "Model-directed retrieval"}:
+                raise ValueError("Unknown retrieval mode.")
+            self.retrieval_mode = mode
+            if self.agent:
+                self.agent.set_retrieval_mode(mode)
 
     def reload_source(self):
         with self.lock:
@@ -118,10 +149,13 @@ class ChatSession:
                 elif text == "/source status":
                     answer = "TinyAgent source context is " + ("on." if self.source_context.enabled else "off.")
                 elif text == "/clear":
-                    self.memory.messages.clear()
+                    self.memory.clear()
                     self.agent.pending_continue = False
                     self.agent.active_run = None
                     answer = "Conversation cleared. Persistent context and trajectory retained."
+                elif text == "/compact":
+                    result = self.agent.compact_memory(2)
+                    answer = f"Memory compacted; retained 2 complete recent turns.\n\n{result['summary']}"
                 elif self.quiz.active:
                     answer = self.quiz.answer(self.agent, text)
                 else:
@@ -226,7 +260,7 @@ def build_app():
 
     def clear(request: gr.Request):
         session = current(request)
-        session.memory.messages.clear()
+        session.memory.clear()
         if session.agent:
             session.agent.pending_continue = False
             session.agent.active_run = None
@@ -240,6 +274,27 @@ def build_app():
             compose_instructions(session.agent, session.context, session.source_context, session.quiz)
         trajectory, context = session.snapshot()
         return "Persistent context reloaded from `about_me.md`.", context, session.status()
+
+    def set_retrieval(mode, request: gr.Request):
+        session = current(request)
+        try:
+            session.set_retrieval_mode(mode)
+            message = f"Retrieval mode set to **{mode}**."
+        except Exception as error:
+            message = f"Could not select retrieval mode: {error}"
+        trajectory, context = session.snapshot()
+        return message, session.status(), trajectory, context
+
+    def compact(retain_turns, request: gr.Request):
+        session = current(request)
+        try:
+            session.ensure_agent()
+            result = session.agent.compact_memory(int(retain_turns))
+            message = f"Memory compacted; retained {int(retain_turns)} complete recent turns.\n\n{result['summary']}"
+        except Exception as error:
+            message = f"Memory compaction failed; working Memory was preserved. {error}"
+        trajectory, context = session.snapshot()
+        return message, trajectory, context
 
     def set_source(enabled, request: gr.Request):
         session = current(request)
@@ -282,6 +337,11 @@ def build_app():
                 conversation = gr.Chatbot(label="Conversation", height=440)
                 question = gr.Textbox(label="Message or command", lines=3, placeholder="Ask a question, /quiz [topic], or /quiz end")
                 with gr.Row():
+                    retrieval_mode = gr.Dropdown(["Off", "Automatic RAG", "Model-directed retrieval"],
+                                                 value="Off", label="Retrieval mode")
+                    retained_turns = gr.Number(value=2, precision=0, label="Recent turns to retain")
+                    compact_button = gr.Button("Compact Memory")
+                with gr.Row():
                     send = gr.Button("Send", variant="primary")
                     continue_button = gr.Button("Continue", interactive=False)
                     clear_button = gr.Button("Clear conversation")
@@ -295,8 +355,8 @@ def build_app():
                 download = gr.File(label="Transcript download", interactive=False)
                 feedback = gr.Markdown()
             with gr.Tab("Trajectory"):
-                gr.Markdown("Runs contain one or more Steps. Each step shows request messages, model, reasoning summary when returned, answer, usage metadata, latency, and errors.")
-                trajectory_view = gr.JSON(label="Run → Step → Action / Observation / Answer / Metadata")
+                gr.Markdown("Each Step is one model request and records its input, model, returned action/observation or answer, usage, latency, and errors. Structured events separately record automatic retrieval and compaction.")
+                trajectory_view = gr.JSON(label="Runs, model-request steps, retrieval and compaction events")
                 trajectory_clear = gr.Button("Clear trajectory")
             with gr.Tab("Context"):
                 gr.Markdown("Persistent instructions and active skill are separate from Memory. Effective messages show the last recorded model request.")
@@ -310,10 +370,13 @@ def build_app():
             session = current(request)
             trajectory, context = session.snapshot()
             return (session.status(), trajectory, context, session.source_context.enabled,
-                    gr.update(interactive=bool(session.agent and session.agent.pending_continue)))
+                    gr.update(interactive=bool(session.agent and session.agent.pending_continue)),
+                    session.retrieval_mode)
 
-        app.load(load, outputs=[status, trajectory_view, context_view, source_toggle, continue_button], **options)
+        app.load(load, outputs=[status, trajectory_view, context_view, source_toggle, continue_button, retrieval_mode], **options)
         source_toggle.change(set_source, inputs=[source_toggle], outputs=[context_view, status], **options)
+        retrieval_mode.change(set_retrieval, inputs=[retrieval_mode], outputs=[feedback, status, trajectory_view, context_view], **options)
+        compact_button.click(compact, inputs=[retained_turns], outputs=[feedback, trajectory_view, context_view], **options)
         source_reload.click(reload_source, outputs=[context_view, status], **options)
         trajectory_clear.click(clear_trajectory, outputs=[trajectory_view], **options)
         send.click(update, inputs=[question], outputs=outputs, **options)

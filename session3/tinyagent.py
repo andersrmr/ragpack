@@ -4,11 +4,18 @@ import inspect
 import json
 import os
 import time
+import copy
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from openai import OpenAI
+
+
+def _safe_error(error):
+    message = f"{type(error).__name__}: {error}"
+    secret = os.environ.get("OPENAI_API_KEY", "").strip()
+    return message.replace(secret, "[REDACTED]") if secret else message
 
 
 @dataclass
@@ -48,6 +55,7 @@ class Run:
 class Trajectory:
     def __init__(self):
         self.runs: list[Run] = []
+        self.events: list[dict] = []
 
     def initialize(self, query: str, metadata: dict | None = None) -> Run:
         run = Run(len(self.runs) + 1, query,
@@ -58,11 +66,15 @@ class Trajectory:
 
     def clear(self):
         self.runs.clear()
+        self.events.clear()
+
+    def record_event(self, kind, **details):
+        self.events.append({"kind": kind, "time": datetime.now(ZoneInfo("America/New_York")).isoformat(), **details})
 
     def to_dict(self):
-        return {"schema_version": 2, "runs": [
+        return {"schema_version": 3, "runs": [
             {**asdict(run), "steps": [asdict(step) for step in run.steps]}
-            for run in self.runs]}
+            for run in self.runs], "events": copy.deepcopy(self.events)}
 
 
 def multiply(a: float, b: float) -> float:
@@ -209,6 +221,20 @@ class LLM:
             "completion_tokens": getattr(usage, "output_tokens", None),
             "reasoning_tokens": getattr(details, "reasoning_tokens", None)})
 
+    def summarize(self, messages):
+        """Make a dedicated tool-free Responses API summarization request."""
+        result = self.client.responses.create(model=self.model, input=messages)
+        texts = []
+        for item in result.output:
+            if item.type == "message":
+                texts.extend(part.text for part in item.content if part.type == "output_text")
+        usage = getattr(result, "usage", None)
+        metadata = {"model": getattr(result, "model", self.model),
+                    "input_tokens": getattr(usage, "input_tokens", None),
+                    "output_tokens": getattr(usage, "output_tokens", None),
+                    "total_tokens": getattr(usage, "total_tokens", None)}
+        return "".join(texts), metadata
+
     def close(self):
         self.client.close()
 
@@ -217,6 +243,10 @@ class Memory:
     """Responses API conversation items; persistent instructions stay external."""
     def __init__(self):
         self.messages: list[dict] = []
+        self.summary = ""
+        self.summary_retained_turns: int | None = None
+        self.transcript_archive: list[dict] | None = None
+        self.transcript_suffix_start = 0
 
     def add(self, role, content):
         self.messages.append({"role": role, "content": content})
@@ -233,20 +263,124 @@ class Memory:
 
     def clear(self):
         self.messages.clear()
+        self.summary = ""
+        self.summary_retained_turns = None
+        self.transcript_archive = None
+        self.transcript_suffix_start = 0
+
+    def transcript_messages(self):
+        if self.transcript_archive is None:
+            return self.messages
+        return self.transcript_archive + self.messages[self.transcript_suffix_start:]
+
+    def complete_turns(self):
+        """Group from each user item through the following complete response sequence."""
+        turns, current = [], []
+        for item in self.messages:
+            if item.get("role") == "user" and current:
+                turns.append(current)
+                current = []
+            current.append(item)
+        if current:
+            turns.append(current)
+        # An unmatched tool call cannot be summarized or retained as a complete turn.
+        for turn in turns:
+            calls = {item.get("call_id") for item in turn if item.get("type") == "function_call"}
+            outputs = {item.get("call_id") for item in turn if item.get("type") == "function_call_output"}
+            if calls != outputs:
+                raise RuntimeError("Memory contains an unmatched tool call/output sequence.")
+        if any(not turn or turn[-1].get("role") != "assistant" for turn in turns):
+            raise RuntimeError("Memory contains an incomplete conversation turn.")
+        return turns
+
+    def compact(self, llm, retain_turns=2):
+        if not isinstance(retain_turns, int) or retain_turns < 0:
+            raise ValueError("retain_turns must be a non-negative integer.")
+        turns = self.complete_turns()
+        if len(turns) <= retain_turns:
+            raise ValueError("There are no older complete turns to compact.")
+        older, recent = turns[:-retain_turns] if retain_turns else turns, turns[-retain_turns:] if retain_turns else []
+        source = []
+        for turn in older:
+            for item in turn:
+                if item.get("role") in {"user", "assistant"}:
+                    source.append({"role": item["role"], "content": item.get("content", "")})
+                elif item.get("type") == "function_call":
+                    source.append({"role": "assistant", "content": f"Requested tool {item.get('name')}: {item.get('arguments')}"})
+                elif item.get("type") == "function_call_output":
+                    source.append({"role": "assistant", "content": f"Tool observation: {item.get('output', '')}"})
+        prompt = [{"role": "developer", "content": (
+            "Summarize only the supplied completed conversation turns for continuity. "
+            "Keep user goals, preferences expressed in these turns, important facts, and unresolved questions. "
+            "Merge any supplied previous compacted summary so continuity is preserved. Do not add facts. "
+            "Do not include system instructions, personal context files, source code, quiz instructions, or hidden reasoning.")},
+            {"role": "user", "content": json.dumps({"previous_compacted_summary": self.summary,
+                                                       "older_complete_turns": source}, ensure_ascii=False)}]
+        # Dedicated request: no native tools and no persistent/system instructions.
+        summary, metadata = llm.summarize(prompt)
+        if not summary.strip():
+            raise ValueError("Summarization returned an empty summary.")
+        prior_transcript = copy.deepcopy(self.transcript_messages())
+        self.transcript_archive = prior_transcript
+        self.summary = summary.strip()
+        self.summary_retained_turns = retain_turns
+        self.messages = [item for turn in recent for item in turn]
+        self.transcript_suffix_start = len(self.messages)
+        return {"summary": self.summary, "retained_turns": retain_turns, "usage": metadata}
+
+
+class CompactMemory:
+    """Named operation for explicit, user-triggered conversation compaction."""
+
+    def __init__(self, memory, llm):
+        self.memory, self.llm = memory, llm
+
+    def run(self, retain_turns=2):
+        return self.memory.compact(self.llm, retain_turns)
 
 
 class TinyAgent:
-    def __init__(self, llm, memory, system_instructions=None, tools=None):
+    def __init__(self, llm, memory, system_instructions=None, tools=None, rag_memory=None):
         self.llm, self.memory = llm, memory
         self.system_instructions = list(system_instructions or [])
         self.tools = tools or NativeTools()
         self.trajectory = Trajectory()
         self.pending_continue = False
         self.active_run: Run | None = None
+        self.rag_memory = rag_memory
+        self.retrieval_mode = "Off"
+        self.turn_retrieval = None
+        self._include_retrieval_once = False
+        if self.rag_memory:
+            def search_documents(query: str, top_k: int = 3):
+                """Search the local learning corpus using a context-aware query."""
+                results = self.rag_memory.search(query, top_k)
+                if self.rag_memory.last_error:
+                    raise RuntimeError(self.rag_memory.last_error)
+                return json.dumps({"query": query, "matches": results}, ensure_ascii=False)
+            self.tools.add_tool("search_documents", search_documents, {
+                "type": "object", "properties": {
+                    "query": {"type": "string", "description": "Search query using relevant conversation context"},
+                    "top_k": {"type": "integer", "description": "Maximum matching passages"}},
+                "required": ["query"], "additionalProperties": False})
+
+    def set_retrieval_mode(self, mode):
+        if mode not in {"Off", "Automatic RAG", "Model-directed retrieval"}:
+            raise ValueError("Unknown retrieval mode.")
+        if mode != "Off" and self.rag_memory is None:
+            raise RuntimeError("Document retrieval is not configured.")
+        self.retrieval_mode = mode
 
     def build_messages(self):
         instructions = [{"role": "system", "content": text}
                         for text in self.system_instructions if text and text.strip()]
+        if self.memory.summary:
+            instructions.append({"role": "developer", "content": "## Compacted conversation summary\n\n" + self.memory.summary})
+        if self._include_retrieval_once and self.turn_retrieval is not None:
+            matches = self.turn_retrieval["matches"]
+            text = ("## Temporary local retrieval context\n" + json.dumps(matches, ensure_ascii=False)
+                    if matches else "## Temporary local retrieval context\nNo relevant local passage was retrieved.")
+            instructions.append({"role": "developer", "content": text})
         return instructions + [dict(item) for item in self.memory.get_messages()]
 
     def run(self, task, run_metadata=None, remember=True):
@@ -256,7 +390,27 @@ class TinyAgent:
             self.memory.add("user", task)
         else:
             self.memory.messages.append({"role": "user", "content": task})
-        self.active_run = self.trajectory.initialize(task, run_metadata)
+        metadata = dict(run_metadata or {})
+        self.turn_retrieval = None
+        if self.retrieval_mode == "Automatic RAG":
+            # Deliberately use this user turn alone: no query rewriting or history merge.
+            matches = self.rag_memory.search(task)
+            self.turn_retrieval = {"query": task, "matches": matches,
+                                   "error": self.rag_memory.last_error,
+                                   "threshold": self.rag_memory.threshold,
+                                   "top_k": self.rag_memory.top_k,
+                                   "threshold_decision": "matches accepted" if matches else "no passage cleared threshold",
+                                   "text_added": ("## Temporary local retrieval context\n" + json.dumps(matches, ensure_ascii=False)
+                                                  if matches else "## Temporary local retrieval context\nNo relevant local passage was retrieved.")}
+            metadata["automatic_retrieval"] = copy.deepcopy(self.turn_retrieval)
+            self.trajectory.record_event("automatic_retrieval", query=task,
+                                         result_ids=[m["document_id"] for m in matches],
+                                         scores=[m["score"] for m in matches],
+                                         error=self.rag_memory.last_error or None)
+            self._include_retrieval_once = True
+        else:
+            self._include_retrieval_once = False
+        self.active_run = self.trajectory.initialize(task, metadata)
         return self._step()
 
     def continue_step(self):
@@ -265,12 +419,32 @@ class TinyAgent:
         self.pending_continue = False
         return self._step()
 
+    def compact_memory(self, retain_turns=2):
+        if self.pending_continue:
+            raise RuntimeError("Cannot compact while a tool result is waiting for Continue.")
+        started = datetime.now(ZoneInfo("America/New_York")).isoformat()
+        try:
+            result = CompactMemory(self.memory, self.llm).run(retain_turns)
+            self.trajectory.record_event("compaction", started_at=started, success=True,
+                                         retained_turns=retain_turns, summary=result["summary"],
+                                         usage=result["usage"])
+            return result
+        except Exception as error:
+            self.trajectory.record_event("compaction", started_at=started, success=False,
+                                         retained_turns=retain_turns,
+                                         error={"type": type(error).__name__,
+                                                "message": _safe_error(error).partition(": ")[2]})
+            raise
+
     def _step(self):
         run = self.active_run
         messages = self.build_messages()
+        include_tool = self.retrieval_mode == "Model-directed retrieval"
+        schemas = self.tools.schemas if include_tool else [s for s in self.tools.schemas if s["name"] != "search_documents"]
+        self._include_retrieval_once = False
         started = time.perf_counter()
         try:
-            response = self.llm.generate(messages, tools=self.tools.schemas)
+            response = self.llm.generate(messages, tools=schemas)
         except Exception as error:
             elapsed = round(time.perf_counter() - started, 4)
             run.steps.append(Step(len(run.steps)+1, "model_request", self.llm.reasoning_effort,
@@ -302,7 +476,11 @@ class TinyAgent:
             if response.content:
                 self.memory.add("assistant", response.content)
             self.memory.add_function_call(call)
-            observation, error = self.tools.execute(call)
+            if call.get("name") == "search_documents" and self.retrieval_mode != "Model-directed retrieval":
+                error = "search_documents is available only in Model-directed retrieval mode."
+                observation = f"Tool error: RuntimeError: {error}"
+            else:
+                observation, error = self.tools.execute(call)
             self.memory.add_function_output(call.get("call_id", ""), observation)
             action = {"call_id": call.get("call_id"), "tool": call.get("name"),
                       "arguments": call.get("arguments")}
