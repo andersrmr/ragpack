@@ -18,6 +18,9 @@ session2/quizzes/
 session3/quizzes/
 session3/results/
 session3/.cache/
+session4/quizzes/
+session4/results/
+session4/.cache/
 course_materials/
 
 # Local environment variables and credentials

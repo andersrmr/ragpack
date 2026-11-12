@@ -1,5 +1,51 @@
 # TinyAgent Development Log
 
+## Session 4 — Observable autonomous ReAct loop, Stage A (2026-11-11)
+
+- Created an independent `session4/` checkpoint by copying the completed
+  Session 3 Stage B implementation. Session 1, Session 2, and Session 3 source
+  files were left unchanged. The existing Responses API request shape,
+  provider `call_id` pairing, allowlisted tools, retrieval corpus and modes,
+  Memory/Trajectory split, compaction, context, quiz, transcript, and Gradio
+  session patterns were retained.
+- Added selectable Manual Continue and Autonomous modes with Manual Continue as
+  the safe default. Each model request counts as one step. Autonomous execution
+  makes sequential requests after one tool action and observation, terminates
+  normally on a no-tool-call response, and records a distinct incomplete
+  `max_steps` outcome after executing an action on the final allowed request.
+  Tool errors remain observations and can be followed by another request.
+- Added explicit run outcomes, mode, configured step limit, step details, and
+  run-finished trajectory events. Stop requests are cooperative. Gradio Stop
+  uses a separate concurrency lane; terminal autonomous execution runs on a
+  worker so `/stop` can be entered. A response returned after stop is
+  discarded before committing function calls to Memory. Active Gradio actions
+  serialize conflicting conversation operations.
+- Automatic RAG remains once per user submission; model-directed retrieval is
+  a tool action in the same mode loop. Responses parallel tool calls remain
+  disabled and unexpected batches are rejected visibly without execution.
+  Provider-supplied reasoning summaries are preserved; an unavailable summary
+  is labeled rather than synthesized. No Plan-and-Solve functionality,
+  `update_plan`, `mark_done`, planner tools, plan state, or planning UI was
+  added.
+- Added `session4/test_autonomy.py`, copied the Session 3 offline regression
+  tests, and wrote `session4/README.md` with setup, control semantics,
+  observability, limits, retrieval, and test instructions. The terminal and
+  Gradio interfaces both expose mode and step limit; Gradio also exposes Stop.
+  Added Session 4 generated-output ignore rules to `.gitignore`.
+
+### Validation
+
+- Session 4: **35 offline tests passed** using fake Responses results,
+  mocked tools, fixture embeddings, and fake Gradio sessions.
+- Session 3: **26 tests passed**; Session 2: **9 tests passed**; Session 1:
+  **28 tests passed**.
+- `compileall` completed for Session 4. `git diff --check` is recorded after
+  the final documentation and code review below.
+- No live API, embedding, or browser session was performed. Account/model
+  compatibility and answer quality remain unverified. Stop does not cancel an
+  in-flight provider request or synchronous tool call; it takes effect at the
+  next safe boundary.
+
 ## Session 3 — Native tool calling, Stage A (2026-11-07)
 
 - Created an independent `session3/` implementation by adapting Session 2's
