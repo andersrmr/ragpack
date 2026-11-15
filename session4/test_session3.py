@@ -86,7 +86,8 @@ class ProviderTests(unittest.TestCase):
                 SimpleNamespace(type="message", content=[
                     SimpleNamespace(type="output_text", text="answer")]),
                 SimpleNamespace(type="reasoning", summary=[
-                    SimpleNamespace(type="summary_text", text="brief summary")]),
+                    SimpleNamespace(type="summary_text", text="brief summary")],
+                               id="rs_test", encrypted_content="sealed-protocol-payload"),
             ],
             model="returned-model",
             usage=SimpleNamespace(input_tokens=5, output_tokens=7, total_tokens=12,
@@ -106,6 +107,8 @@ class ProviderTests(unittest.TestCase):
         response = llm.generate([{"role": "user", "content": "question"}])
         self.assertEqual(response.content, "answer")
         self.assertEqual(response.reasoning, "brief summary")
+        self.assertEqual(response.protocol_items[1]["type"], "reasoning")
+        self.assertEqual(response.protocol_items[1]["encrypted_content"], "sealed-protocol-payload")
         self.assertEqual(response.metadata["prompt_tokens"], 5)
         self.assertEqual(response.metadata["completion_tokens"], 7)
         self.assertEqual(response.metadata["total_tokens"], 12)

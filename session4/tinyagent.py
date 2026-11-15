@@ -25,6 +25,63 @@ class Response:
     reasoning: str = ""
     tool_call: dict | None = None
     metadata: dict | None = None
+    protocol_items: list[dict] = field(default_factory=list)
+
+
+def _serialize_output_item(item):
+    """Return the complete Responses output item for protocol replay."""
+    if isinstance(item, dict):
+        return copy.deepcopy(item)
+    serializer = getattr(item, "to_dict", None)
+    if callable(serializer):
+        return serializer()
+    serializer = getattr(item, "model_dump", None)
+    if callable(serializer):
+        return serializer(mode="json", exclude_none=True)
+    if hasattr(item, "__dict__"):
+        return {key: _serialize_output_value(value) for key, value in vars(item).items()}
+    raise TypeError(f"Cannot serialize Responses output item of type {type(item).__name__}.")
+
+
+def _serialize_output_value(value):
+    if isinstance(value, dict):
+        return {key: _serialize_output_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_output_value(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return {key: _serialize_output_value(item) for key, item in vars(value).items()}
+    return value
+
+
+def message_text(content):
+    """Extract displayable text from plain or Responses message content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "") if isinstance(item, dict)
+            else getattr(item, "text", "")
+            for item in content
+            if (item.get("type") if isinstance(item, dict) else getattr(item, "type", None))
+            in {"output_text", "text"}
+        )
+    return str(content) if content is not None else ""
+
+
+def _observable_protocol_item(item):
+    """Hide opaque reasoning payloads while retaining useful protocol metadata."""
+    if item.get("type") != "reasoning":
+        return copy.deepcopy(item)
+    return {
+        key: copy.deepcopy(item[key])
+        for key in ("type", "id", "summary", "status")
+        if key in item
+    } | {"protocol_payload": "Opaque provider item retained internally; payload omitted from display."}
+
+
+def _observable_messages(messages):
+    return [_observable_protocol_item(item) if item.get("type") == "reasoning"
+            else copy.deepcopy(item) for item in messages]
 
 
 @dataclass
@@ -195,8 +252,9 @@ class LLM:
             kwargs["tool_choice"] = "auto"
             kwargs["parallel_tool_calls"] = False
         result = self.client.responses.create(**kwargs)
-        texts, reasoning, calls = [], [], []
+        texts, reasoning, calls, protocol_items = [], [], [], []
         for item in result.output:
+            protocol_items.append(_serialize_output_item(item))
             if item.type == "message":
                 for part in item.content:
                     if part.type == "output_text":
@@ -223,7 +281,7 @@ class LLM:
             "total_tokens": getattr(usage, "total_tokens", None),
             "prompt_tokens": getattr(usage, "input_tokens", None),
             "completion_tokens": getattr(usage, "output_tokens", None),
-            "reasoning_tokens": getattr(details, "reasoning_tokens", None)})
+            "reasoning_tokens": getattr(details, "reasoning_tokens", None)}, protocol_items)
 
     def summarize(self, messages):
         """Make a dedicated tool-free Responses API summarization request."""
@@ -264,6 +322,9 @@ class Memory:
 
     def get_messages(self):
         return self.messages
+
+    def display_messages(self):
+        return _observable_messages(self.messages)
 
     def clear(self):
         self.messages.clear()
@@ -308,7 +369,7 @@ class Memory:
         for turn in older:
             for item in turn:
                 if item.get("role") in {"user", "assistant"}:
-                    source.append({"role": item["role"], "content": item.get("content", "")})
+                    source.append({"role": item["role"], "content": message_text(item.get("content", ""))})
                 elif item.get("type") == "function_call":
                     source.append({"role": "assistant", "content": f"Requested tool {item.get('name')}: {item.get('arguments')}"})
                 elif item.get("type") == "function_call_output":
@@ -560,7 +621,7 @@ class TinyAgent:
         except Exception as error:
             elapsed = round(time.perf_counter() - started, 4)
             run.steps.append(Step(len(run.steps)+1, "model_request", self.llm.reasoning_effort,
-                                  self.llm.model, messages, elapsed,
+                                  self.llm.model, _observable_messages(messages), elapsed,
                                   error={"type": type(error).__name__, "message": _safe_error(error)}))
             run.duration_seconds += elapsed
             raise
@@ -568,7 +629,7 @@ class TinyAgent:
         if self._stop_requested.is_set():
             run.outcome = "stopped"
             run.steps.append(Step(len(run.steps)+1, "discarded_response", self.llm.reasoning_effort,
-                                  self.llm.model, messages, elapsed,
+                                  self.llm.model, _observable_messages(messages), elapsed,
                                   action={"tool": (response.tool_call or {}).get("name")
                                           if response.tool_call and "multiple_calls" not in response.tool_call else "pending"},
                                   observation="Stop requested during model request; the uncommitted response and any pending action were discarded."))
@@ -578,17 +639,22 @@ class TinyAgent:
                             metadata={"run_outcome": "stopped"})
         model = (response.metadata or {}).get("model", self.llm.model)
         base = dict(step_id=len(run.steps)+1, reasoning_effort=self.llm.reasoning_effort,
-                    model=model, input_messages=messages, latency_seconds=elapsed,
+                    model=model, input_messages=_observable_messages(messages), latency_seconds=elapsed,
                     reasoning=response.reasoning or "Unavailable: the provider supplied no reasoning summary.",
                     metadata=response.metadata)
         call = response.tool_call
+        if response.protocol_items:
+            # Responses reasoning items are opaque protocol state. Retain the
+            # provider's complete output sequence for the next API request.
+            self.memory.messages.extend(copy.deepcopy(response.protocol_items))
         if call and "multiple_calls" in call:
             # Keep the exact provider requests visible, reject as a single explicit error.
             call_id = call["multiple_calls"][0].get("call_id", "")
             text = f"Rejected {len(call['multiple_calls'])} function calls: Stage A executes one action per step."
-            if response.content:
+            if response.content and not response.protocol_items:
                 self.memory.add("assistant", response.content)
-            self.memory.messages.extend(call["multiple_calls"])
+            if not response.protocol_items:
+                self.memory.messages.extend(call["multiple_calls"])
             for item in call["multiple_calls"]:
                 self.memory.add_function_output(item.get("call_id", ""), text)
             action = {"tool": "multiple_calls", "calls": call["multiple_calls"]}
@@ -597,9 +663,10 @@ class TinyAgent:
             run.duration_seconds += elapsed
             return Response(content=text, tool_call=action, metadata=response.metadata)
         if call:
-            if response.content:
+            if response.content and not response.protocol_items:
                 self.memory.add("assistant", response.content)
-            self.memory.add_function_call(call)
+            if not response.protocol_items:
+                self.memory.add_function_call(call)
             if call.get("name") == "search_documents" and self.retrieval_mode != "Model-directed retrieval":
                 error = "search_documents is available only in Model-directed retrieval mode."
                 observation = f"Tool error: RuntimeError: {error}"
@@ -615,7 +682,9 @@ class TinyAgent:
             self.pending_continue = True
             return Response(content=observation, reasoning=response.reasoning,
                             tool_call=action, metadata=response.metadata)
-        if response.content:
+        if response.protocol_items:
+            pass
+        elif response.content:
             self.memory.add("assistant", response.content)
         run.steps.append(Step(kind="final_answer", **base, answer=response.content))
         run.duration_seconds += elapsed

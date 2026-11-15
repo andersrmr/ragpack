@@ -46,6 +46,25 @@
   in-flight provider request or synchronous tool call; it takes effect at the
   next safe boundary.
 
+## Session 4 — Preserve Responses reasoning protocol items (2026-11-15)
+
+- Diagnosed a live Continue failure from the provider error: the follow-up
+  request replayed a `function_call` without its required preceding reasoning
+  output item. `LLM.generate` had extracted only the provider-supplied summary
+  and discarded the full protocol item.
+- Updated Session 4 to retain and replay the complete Responses output-item
+  sequence in original order before appending each function output. This keeps
+  the opaque provider item available for API protocol continuity without
+  exposing its encrypted payload in the Gradio Context view, Trajectory input
+  display, chat history, or transcript. Supported provider reasoning summaries
+  remain visible as before.
+- Added offline regression coverage for the exact reasoning/function-call /
+  function-output sequence, successful Continue behavior, and display
+  redaction. No live API retry was made.
+- Validation: **36 Session 4 offline tests passed** and `compileall` completed.
+  The successful continuation is verified with a fake Responses result; the
+  original live failure was not retried against an API account.
+
 ## Session 3 — Native tool calling, Stage A (2026-11-07)
 
 - Created an independent `session3/` implementation by adapting Session 2's

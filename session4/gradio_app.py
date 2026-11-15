@@ -10,7 +10,7 @@ import gradio as gr
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
 from context import PersistentContext, SourceCodeContext, compose_instructions
 from quiz import QuizManager
-from tinyagent import LLM, Memory, NativeTools, TinyAgent
+from tinyagent import LLM, Memory, NativeTools, TinyAgent, message_text
 from retrieval import EmbeddingModel, RAGMemory
 from transcripts import format_transcript, write_transcript
 
@@ -42,7 +42,7 @@ class ChatSession:
         displayed, actions = [], {}
         for item in self.memory.get_messages():
             if item.get("role") in {"user", "assistant"}:
-                displayed.append({"role": item["role"], "content": item.get("content", "")})
+                displayed.append({"role": item["role"], "content": message_text(item.get("content", ""))})
             elif item.get("type") == "function_call":
                 try:
                     args = json.dumps(json.loads(item.get("arguments", "{}")), ensure_ascii=False)
@@ -72,7 +72,7 @@ class ChatSession:
             "persistent_sources": self.context.sources,
             "source_code_context": self.source_context.view,
             "active_skill": self.quiz.skill_text if self.quiz.active else "",
-            "conversation_memory": self.memory.get_messages(),
+            "conversation_memory": self.memory.display_messages(),
             "effective_messages_for_latest_run": latest["input_messages"] if latest else [],
             "latest_run_metadata": (trajectory["runs"][-1] if trajectory["runs"] else None),
             "retrieval": {"selected_mode": self.retrieval_mode,
@@ -384,7 +384,7 @@ def build_app():
                 trajectory_view = gr.JSON(label="Runs, model-request steps, retrieval and compaction events")
                 trajectory_clear = gr.Button("Clear trajectory")
             with gr.Tab("Context"):
-                gr.Markdown("Persistent instructions and active skill are separate from Memory. Effective messages show the last recorded model request.")
+                gr.Markdown("Persistent instructions and active skill are separate from Memory. Effective messages show the last recorded model request; opaque reasoning protocol payloads are retained for API continuation but redacted from these views and transcripts.")
                 source_toggle = gr.Checkbox(label="Include session4/tinyagent.py in model requests (adds source tokens)", value=False)
                 source_reload = gr.Button("Reload tinyagent.py")
                 context_view = gr.JSON(label="Context sources and latest effective request")

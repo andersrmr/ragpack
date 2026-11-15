@@ -4,6 +4,8 @@ from datetime import datetime
 from itertools import count
 from pathlib import Path
 
+from tinyagent import message_text
+
 
 def format_transcript(memory) -> str:
     source = memory.transcript_messages() if hasattr(memory, "transcript_messages") else memory.get_messages()
@@ -13,7 +15,7 @@ def format_transcript(memory) -> str:
     blocks = ["# TinyAgent conversation"]
     for message in messages:
         speaker = "You" if message["role"] == "user" else "TinyAgent"
-        blocks.append(f"## {speaker}\n\n{message['content']}")
+        blocks.append(f"## {speaker}\n\n{message_text(message.get('content', ''))}")
     return "\n\n".join(blocks) + "\n"
 
 

@@ -1,8 +1,10 @@
 """Offline checks for Session 4 Stage A run control."""
 import threading
 import unittest
+import json
 
 from tinyagent import Memory, Response, TinyAgent
+from transcripts import format_transcript
 
 
 class FakeLLM:
@@ -12,9 +14,11 @@ class FakeLLM:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = 0
+        self.requests = []
 
     def generate(self, messages, tools=None):
         self.calls += 1
+        self.requests.append(messages)
         item = self.responses.pop(0)
         if isinstance(item, threading.Event):
             item.set()
@@ -150,6 +154,47 @@ class AutonomyTests(unittest.TestCase):
         self.assertIn("Execution: autonomous", session.status())
         self.assertEqual(session.agent.active_run.max_steps, 4)
         session.dispose()
+
+    def test_responses_reasoning_item_round_trips_for_manual_continue_without_display_leak(self):
+        opaque_reasoning = {
+            "type": "reasoning", "id": "rs_protocol_1",
+            "summary": [{"type": "summary_text", "text": "A brief provider summary."}],
+            "encrypted_content": "opaque-payload-do-not-display",
+        }
+        provider_call = {
+            "type": "function_call", "id": "fc_protocol_1", "call_id": "call_protocol_1",
+            "name": "get_weather", "arguments": '{"location":"Costa Rica"}',
+        }
+        llm = FakeLLM([
+            Response(tool_call=provider_call, protocol_items=[opaque_reasoning, provider_call]),
+            Response(content="The simulated result is not a real forecast.", protocol_items=[{
+                "type": "message", "id": "msg_final", "role": "assistant",
+                "content": [{"type": "output_text", "text": "The simulated result is not a real forecast."}],
+                "status": "completed",
+            }]),
+        ])
+        agent = TinyAgent(llm, Memory())
+        agent.run("Should I pack for Costa Rica?")
+        result = agent.continue_step()
+
+        self.assertIn("not a real forecast", result.content)
+        continuation = llm.requests[1]
+        protocol_types = [item.get("type") for item in continuation]
+        reasoning_index = protocol_types.index("reasoning")
+        function_index = protocol_types.index("function_call")
+        output_index = protocol_types.index("function_call_output")
+        self.assertLess(reasoning_index, function_index)
+        self.assertLess(function_index, output_index)
+        self.assertEqual(continuation[reasoning_index]["encrypted_content"], "opaque-payload-do-not-display")
+
+        trajectory_input = agent.active_run.steps[1].input_messages
+        display_json = json.dumps({
+            "memory": agent.memory.display_messages(),
+            "trajectory_input": trajectory_input,
+        })
+        self.assertNotIn("opaque-payload-do-not-display", display_json)
+        self.assertIn("A brief provider summary", display_json)
+        self.assertNotIn("opaque-payload-do-not-display", format_transcript(agent.memory))
 
 
 if __name__ == "__main__":

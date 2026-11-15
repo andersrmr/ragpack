@@ -58,6 +58,11 @@ active, other commands are deferred until it stops or finishes.
 
 Responses API function calls preserve provider `call_id` correlation; schemas,
 arguments, tool names, and execution are validated against the allowlist.
+For reasoning models, the complete provider output items, including opaque
+reasoning protocol items, are replayed with tool outputs so a follow-up request
+can continue the same function-call turn. Those opaque payloads are not shown
+in the Context view, Trajectory request display, or transcript; only supported
+provider-supplied reasoning summaries are displayed.
 Parallel calls are disabled in requests and a returned batch is visibly
 rejected without executing any call. Memory contains conversation protocol
 items; Trajectory separately stores run mode, configured limit, each model
