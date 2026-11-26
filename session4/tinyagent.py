@@ -153,6 +153,11 @@ def subtract(a: float, b: float) -> float:
     return a - b
 
 
+def divide(a: float, b: float) -> float:
+    """Divide the first number (a) by the second (b)."""
+    return a / b
+
+
 def get_weather(location: str) -> str:
     """Return clearly labeled simulated weather for a location."""
     return f"Simulated weather for {location}: sunny, 72°F (demonstration only; not a real observation)."
@@ -173,6 +178,7 @@ class NativeTools:
             "required": ["a", "b"], "additionalProperties": False})
         self.add_tool("add", add)
         self.add_tool("subtract", subtract)
+        self.add_tool("divide", divide)
         self.add_tool("get_weather", get_weather, {
             "type": "object", "properties": {
                 "location": {"type": "string", "description": "Location name"}},
