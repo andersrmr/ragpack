@@ -143,6 +143,16 @@ def multiply(a: float, b: float) -> float:
     return a * b
 
 
+def add(a: float, b: float) -> float:
+    """Add two numbers."""
+    return a + b
+
+
+def subtract(a: float, b: float) -> float:
+    """Subtract the second number (b) from the first (a)."""
+    return a - b
+
+
 def get_weather(location: str) -> str:
     """Return clearly labeled simulated weather for a location."""
     return f"Simulated weather for {location}: sunny, 72°F (demonstration only; not a real observation)."
@@ -161,6 +171,8 @@ class NativeTools:
                 "a": {"type": "number", "description": "First number"},
                 "b": {"type": "number", "description": "Second number"}},
             "required": ["a", "b"], "additionalProperties": False})
+        self.add_tool("add", add)
+        self.add_tool("subtract", subtract)
         self.add_tool("get_weather", get_weather, {
             "type": "object", "properties": {
                 "location": {"type": "string", "description": "Location name"}},
