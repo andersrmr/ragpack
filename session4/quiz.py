@@ -44,7 +44,8 @@ class QuizManager:
                   '"answer", and "explanation" string fields. Use concise, unambiguous questions. '
                   "Do not include markdown fences.")
         try:
-            response = agent.run(prompt, run_metadata={"kind": "quiz_generation", "topic": topic}, remember=False)
+            response = agent.run(prompt, run_metadata={"kind": "quiz_generation", "topic": topic},
+                                 remember=False, tools_enabled=False)
         except Exception:
             agent.system_instructions = [text for text in agent.system_instructions if text != self.skill_text]
             raise
@@ -102,10 +103,12 @@ class QuizManager:
                   "Do not ask a question, repeat or rephrase this question, introduce or preview another question, "
                   "or give an example phrased as a quiz question. Do not write a 'Question N' heading. "
                   "The quiz harness will present the next question after your feedback. Stop after the feedback.")
-        response = agent.run(prompt, run_metadata={"kind": "quiz_answer", "topic": self.quiz["topic"], "question": index + 1})
+        learner_index = len(agent.memory.messages)
+        response = agent.run(prompt, run_metadata={"kind": "quiz_answer", "topic": self.quiz["topic"], "question": index + 1},
+                             tools_enabled=False)
         # Keep learner-visible conversation in Memory; the fuller grading
         # instruction remains available in the trajectory request snapshot.
-        agent.memory.messages[-2]["content"] = answer
+        agent.memory.messages[learner_index]["content"] = answer
         self.quiz["results"].append({"answer": answer, "feedback": response.content})
         self.quiz["current"] += 1
         self._write_artifact()
@@ -113,14 +116,15 @@ class QuizManager:
             score_prompt = ("Based only on this quiz interaction and the supplied quiz results, give a short "
                             "final summary of performance and review recommendations: "
                             + json.dumps(self.quiz["results"], ensure_ascii=False))
-            final = agent.run(score_prompt, run_metadata={"kind": "quiz_summary", "topic": self.quiz["topic"]}, remember=False)
+            final = agent.run(score_prompt, run_metadata={"kind": "quiz_summary", "topic": self.quiz["topic"]},
+                              remember=False, tools_enabled=False)
             self.quiz["summary"] = final.content
             self._write_artifact()
-            result = response.content + "\n\n" + final.content + "\n\nQuiz complete. Use `/quiz end` to return to ordinary tutoring."
+            result = response.content + "\n\n" + final.content
         else:
-            result = response.content + "\n\n" + self.current_question
-        agent.memory.messages[-1]["content"] = result
-        return result
+            result = response.content
+        agent.memory.add("assistant", self.current_question)
+        return result + "\n\n" + self.current_question
 
     def end(self, agent) -> str:
         if not self.active:

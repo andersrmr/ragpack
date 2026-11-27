@@ -1,5 +1,29 @@
 # TinyAgent Development Log
 
+## Session 4 — Explicit planning, Stage B (2026-11-25)
+
+- Added `NativePlanAndSolve` to the existing `TinyAgent` ReAct harness. Planning
+  strategy and manual/autonomous execution are independently selectable. The
+  default remains ReAct with Manual Continue. `update_plan` and `mark_done`
+  use the native Responses tool dispatcher, output replay, and step budget.
+- Scoped each checklist to its run. Revisions retain IDs and status for
+  uniquely matching descriptions after whitespace normalization and case
+  folding. New, rewritten, and ambiguous tasks receive new pending IDs.
+  Trajectory records revisions, removed items, and model declarations of
+  completion. Final answers with pending items remain valid protocol endings.
+- Added terminal `/planner` and `/plan` commands, a Gradio planning selector
+  and Plan tab, and per-run comparison metrics. Strategy changes wait for safe
+  run boundaries. Stop can also end a paused run while preserving its checklist.
+  Quiz requests remain under explicit quiz control and use tool-free requests.
+- Verified **54 Session 4**, **26 Session 3**, **9 Session 2**, and **28 Session 1**
+  offline tests with Python 3.12.8. Compilation and `git diff --check` passed.
+  Existing Gradio/asyncio event-loop resource warnings were still emitted.
+  The scripted shopping comparison produced $17.66 in five ReAct requests
+  and eight Plan-and-Solve requests. Those counts reflect the scripted actions.
+- Live model comparisons and browser interaction remain to be checked. Plan
+  state is session-local and stop remains cooperative. Memory with an incomplete
+  turn still fails the existing compaction boundary check.
+
 ## Session 4 — Observable autonomous ReAct loop, Stage A (2026-11-11)
 
 - Created an independent `session4/` checkpoint by copying the completed

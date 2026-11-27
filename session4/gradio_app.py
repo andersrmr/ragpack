@@ -9,6 +9,7 @@ from threading import RLock
 import gradio as gr
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
 from context import PersistentContext, SourceCodeContext, compose_instructions
+from planning import PLANNING_STRATEGIES, REACT
 from quiz import QuizManager
 from tinyagent import LLM, Memory, NativeTools, TinyAgent, message_text
 from retrieval import EmbeddingModel, RAGMemory
@@ -29,6 +30,7 @@ class ChatSession:
         self.retrieval_mode = "Off"
         self.rag_memory = None
         self.execution_mode = "manual"
+        self.planning_strategy = REACT
         self.max_steps = 10
 
     def ensure_agent(self):
@@ -37,6 +39,7 @@ class ChatSession:
             self.rag_memory = RAGMemory(embedding_model=EmbeddingModel(self.llm.client))
             self.agent = TinyAgent(self.llm, self.memory, [self.context.system_message], NativeTools(), self.rag_memory)
             self.agent.set_retrieval_mode(self.retrieval_mode)
+            self.agent.set_planning_strategy(self.planning_strategy)
 
     def history(self):
         displayed, actions = [], {}
@@ -68,6 +71,8 @@ class ChatSession:
             if self.memory.messages[index].get("role") == "user":
                 latest_turn_items = self.memory.messages[index:]
                 break
+        retrieval_calls = {item.get("call_id") for item in latest_turn_items
+                           if item.get("type") == "function_call" and item.get("name") == "search_documents"}
         return trajectory, {
             "persistent_sources": self.context.sources,
             "source_code_context": self.source_context.view,
@@ -85,17 +90,38 @@ class ChatSession:
                           "retained_turn_boundary": self.memory.summary_retained_turns,
                           "model_directed_tool_schema": next((s for s in self.agent.tools.schemas if s["name"] == "search_documents"), None) if self.agent and self.retrieval_mode == "Model-directed retrieval" else None,
                           "latest_model_directed_actions": [step for step in ((latest_run or {}).get("steps", [])) if (step.get("action") or {}).get("tool") == "search_documents"],
-                          "latest_model_directed_items": [item for item in latest_turn_items if item.get("type") in {"function_call", "function_call_output"}]},
+                          "latest_model_directed_items": [item for item in latest_turn_items if item.get("call_id") in retrieval_calls]},
         }
 
     def status(self):
         model = self.llm.model if self.llm else (os.environ.get("TINYAGENT_MODEL", "not configured"))
         mode = f"Quiz active: {self.quiz.quiz['topic']}" if self.quiz.active else "Ordinary tutoring"
         mode += f" | Retrieval: {self.retrieval_mode}"
+        mode += f" | Planning: {self.planning_strategy}"
         mode += f" | Execution: {self.execution_mode} | Run: {self.agent.active_run.outcome if self.agent and self.agent.active_run else 'idle'}"
         if self.source_context.enabled:
             mode += " | TinyAgent source included" if self.source_context.source else " | TinyAgent source unavailable"
         return f"Model: {model} | {mode}"
+
+    def plan_view(self):
+        if self.agent:
+            return self.agent.plan_status()
+        return f"Planning strategy: {self.planning_strategy}\n\nNo plan exists for this run."
+
+    def set_planning_strategy(self, strategy):
+        with self.lock:
+            if strategy not in PLANNING_STRATEGIES:
+                raise ValueError("Unknown planning strategy.")
+            if self.agent:
+                self.agent.set_planning_strategy(strategy)
+            self.planning_strategy = strategy
+
+    def clear_conversation(self):
+        with self.lock:
+            if self.agent:
+                self.agent.clear_conversation()
+            else:
+                self.memory.clear()
 
     def set_source_enabled(self, enabled):
         with self.lock:
@@ -117,21 +143,20 @@ class ChatSession:
             if self.agent:
                 compose_instructions(self.agent, self.context, self.source_context, self.quiz)
 
-    def send(self, text, execution_mode=None, max_steps=None):
+    def send(self, text, execution_mode=None, max_steps=None, planning_strategy=None):
         with self.lock:
             if self.ended:
                 return text, "Session ended. Refresh to start a new session."
             text = (text or "").strip()
             if not text:
                 return text, "Enter a message."
+            if text == "/clear":
+                self.clear_conversation()
+                return "", "Conversation and active plan cleared. Persistent context and trajectory retained."
+            history_length = len(self.memory.messages)
             try:
                 self.ensure_agent()
-                if execution_mode in {"Manual Continue", "Autonomous"}:
-                    self.execution_mode = "autonomous" if execution_mode == "Autonomous" else "manual"
-                if max_steps is not None:
-                    self.max_steps = max(1, int(max_steps))
                 compose_instructions(self.agent, self.context, self.source_context, self.quiz)
-                history_length = len(self.memory.messages)
                 if text == "/continue":
                     result = self.agent.continue_step()
                     answer = result.content
@@ -155,28 +180,28 @@ class ChatSession:
                     answer = "TinyAgent source code reloaded."
                 elif text == "/source status":
                     answer = "TinyAgent source context is " + ("on." if self.source_context.enabled else "off.")
-                elif text == "/clear":
-                    self.memory.clear()
-                    self.agent.pending_continue = False
-                    self.agent.active_run = None
-                    answer = "Conversation cleared. Persistent context and trajectory retained."
                 elif text == "/compact":
                     result = self.agent.compact_memory(2)
                     answer = f"Memory compacted; retained 2 complete recent turns.\n\n{result['summary']}"
                 elif self.quiz.active:
                     answer = self.quiz.answer(self.agent, text)
                 else:
+                    if self.agent.pending_continue:
+                        raise RuntimeError("Continue, stop, or clear the paused run before submitting a new task.")
+                    if planning_strategy is not None:
+                        self.set_planning_strategy(planning_strategy)
+                    if execution_mode in {"Manual Continue", "Autonomous"}:
+                        self.execution_mode = "autonomous" if execution_mode == "Autonomous" else "manual"
+                    if max_steps is not None:
+                        self.max_steps = max(1, int(max_steps))
                     result = self.agent.run(text, mode=self.execution_mode, max_steps=self.max_steps)
-                    answer = result.content
-                    if result.tool_call:
-                        action = result.tool_call
-                        answer = (f"**Action**\n\nTool: `{action.get('tool')}`\n\n"
-                                  f"Arguments requested: `{action.get('arguments')}`\n\n"
-                                  f"**Observation**\n\n{answer}\n\n" + ("Autonomous loop stopped." if self.execution_mode == "autonomous" else "Use Continue for one model step."))
-                        if self.execution_mode == "autonomous":
-                            answer += f"\n\n**Run outcome: {self.agent.active_run.outcome}** · {len(self.agent.active_run.steps)} / {self.max_steps} model steps."
-                    elif result.metadata and result.metadata.get("run_outcome"):
-                        answer += f"\n\n**Run outcome: {result.metadata['run_outcome']}** · {result.metadata.get('steps_used')} / {result.metadata.get('max_steps')} model steps."
+                    if self.execution_mode == "autonomous":
+                        run = self.agent.active_run
+                        answer = f"**Run outcome: {run.outcome}** · {len(run.steps)} / {run.max_steps} model steps."
+                    elif self.agent.pending_continue:
+                        answer = "Use Continue for one model step."
+                    else:
+                        answer = result.content or f"Run outcome: {self.agent.active_run.outcome}."
             except Exception as error:
                 if self.agent is not None:
                     del self.memory.messages[history_length:]
@@ -200,8 +225,10 @@ class ChatSession:
 
     def stop(self):
         if self.agent and self.agent.request_stop():
-            return "Stop requested. Any in-flight request will finish before the stop is honored."
-        return "No run is active."
+            if not self.agent.run_active and self.agent.active_run and self.agent.active_run.outcome == "stopped":
+                return "Run stopped."
+            return "Stop requested. Any in-flight request or tool will finish before the stop is honored."
+        return "No run is active or paused."
 
     def save(self):
         with self.lock:
@@ -253,40 +280,63 @@ def build_app():
     def current(request: gr.Request):
         return sessions.get(request.session_hash)
 
-    def update(text, mode, limit, request: gr.Request):
-        session = current(request)
-        remaining, answer = session.send(text, mode, limit)
+    def control_state(session):
+        paused = bool(session.agent and session.agent.pending_continue)
+        running = bool(session.agent and session.agent.run_active)
+        return (gr.update(interactive=paused and not running),
+                gr.update(value=session.planning_strategy, interactive=not paused and not running),
+                session.plan_view())
+
+    def update_state(session, answer):
         trajectory, context = session.snapshot()
-        return (remaining, session.history(), session.status(), trajectory, context,
-                session.source_context.enabled,
-                gr.update(interactive=bool(session.agent and session.agent.pending_continue)))
+        history = session.history()
+        feedback = "" if history and history[-1]["content"] == answer else answer
+        return (history, feedback, session.status(), trajectory, context,
+                session.source_context.enabled, *control_state(session))
+
+    def update(text, mode, limit, strategy, request: gr.Request):
+        session = current(request)
+        prior_length = len(session.memory.messages)
+        remaining, answer = session.send(text, mode, limit, strategy)
+        if session.quiz.active and text and not text.lstrip().startswith("/") and len(session.memory.messages) > prior_length:
+            answer = ""  # Quiz feedback and the next question are already in Chat.
+        return (remaining, *update_state(session, answer))
+
+    def set_planning(strategy, request: gr.Request):
+        session = current(request)
+        try:
+            session.set_planning_strategy(strategy)
+            message = ""
+        except (RuntimeError, ValueError) as error:
+            message = str(error)
+        return message, session.status(), *control_state(session)
 
     def stop_action(request: gr.Request):
         session = current(request)
         message = session.stop()
-        return message, session.status(), session.agent.trajectory.to_dict() if session.agent else {"runs": []}
+        trajectory = (session.agent.trajectory.to_dict()
+                      if session.agent and not session.agent.run_active else gr.skip())
+        return message, session.status(), trajectory, *control_state(session)
 
     def continue_action(request: gr.Request):
         session = current(request)
-        remaining, answer = session.send("/continue")
-        trajectory, context = session.snapshot()
-        return (session.history(), answer, session.status(), trajectory, context,
-                gr.update(interactive=bool(session.agent and session.agent.pending_continue)))
+        _, answer = session.send("/continue")
+        return update_state(session, answer)
 
     def activate_quiz(topic, request: gr.Request):
-        return update("/quiz " + (topic or ""), "Manual Continue", 10, request)
+        session = current(request)
+        _, answer = session.send("/quiz " + (topic or ""))
+        return "", *update_state(session, answer)
 
     def deactivate_quiz(request: gr.Request):
-        return update("/quiz end", "Manual Continue", 10, request)
+        session = current(request)
+        _, answer = session.send("/quiz end")
+        return "", *update_state(session, answer)
 
     def clear(request: gr.Request):
         session = current(request)
-        session.memory.clear()
-        if session.agent:
-            session.agent.pending_continue = False
-            session.agent.active_run = None
-        trajectory, context = session.snapshot()
-        return [], "Conversation cleared. Persistent context and trajectory retained.", trajectory, context, gr.update(interactive=False)
+        session.clear_conversation()
+        return update_state(session, "Conversation and active plan cleared. Persistent context and trajectory retained.")
 
     def reload_context(request: gr.Request):
         session = current(request)
@@ -351,13 +401,14 @@ def build_app():
 
     with gr.Blocks(title="TinyAgent Session 4", analytics_enabled=False) as app:
         state = gr.State(None, delete_callback=sessions.remove)
-        gr.Markdown("# TinyAgent course tutor · Session 4 Stage A\nManual Continue or autonomous ReAct execution.")
+        gr.Markdown("# TinyAgent course tutor · Session 4 Stage B")
         status = gr.Textbox(label="Status", value=f"Model: {os.environ.get('TINYAGENT_MODEL', 'not configured')}", interactive=False)
         with gr.Tabs():
             with gr.Tab("Chat"):
                 conversation = gr.Chatbot(label="Conversation", height=440)
                 question = gr.Textbox(label="Message or command", lines=3, placeholder="Ask a question, /quiz [topic], or /quiz end")
                 with gr.Row():
+                    planning_strategy = gr.Dropdown(list(PLANNING_STRATEGIES), value=REACT, label="Planning strategy")
                     execution_mode = gr.Dropdown(["Manual Continue", "Autonomous"], value="Manual Continue", label="Execution mode")
                     max_steps = gr.Slider(1, 30, value=10, step=1, label="Maximum model steps")
                     stop_button = gr.Button("Stop run")
@@ -379,9 +430,11 @@ def build_app():
                     quiz_end = gr.Button("End quiz")
                 download = gr.File(label="Transcript download", interactive=False)
                 feedback = gr.Markdown()
+            with gr.Tab("Plan"):
+                plan_display = gr.Markdown(f"Planning strategy: {REACT}\n\nNo plan exists for this run.")
             with gr.Tab("Trajectory"):
-                gr.Markdown("Each Step is one model request and records its input, model, returned action/observation or answer, usage, latency, and errors. Structured events separately record automatic retrieval and compaction.")
-                trajectory_view = gr.JSON(label="Runs, model-request steps, retrieval and compaction events")
+                gr.Markdown("Each run includes metrics, model-request steps, and any plan. Events show plan revisions, retrieval, and compaction.")
+                trajectory_view = gr.JSON(label="Runs and events")
                 trajectory_clear = gr.Button("Clear trajectory")
             with gr.Tab("Context"):
                 gr.Markdown("Persistent instructions and active skill are separate from Memory. Effective messages show the last recorded model request; opaque reasoning protocol payloads are retained for API continuation but redacted from these views and transcripts.")
@@ -389,28 +442,31 @@ def build_app():
                 source_reload = gr.Button("Reload tinyagent.py")
                 context_view = gr.JSON(label="Context sources and latest effective request")
 
-        outputs = [question, conversation, status, trajectory_view, context_view, source_toggle, continue_button]
+        controls = [continue_button, planning_strategy, plan_display]
+        state_outputs = [conversation, feedback, status, trajectory_view, context_view, source_toggle, *controls]
+        outputs = [question, *state_outputs]
         options = {"concurrency_id": "session4-actions", "concurrency_limit": 1}
         def load(request: gr.Request):
             session = current(request)
             trajectory, context = session.snapshot()
             return (session.status(), trajectory, context, session.source_context.enabled,
-                    gr.update(interactive=bool(session.agent and session.agent.pending_continue)),
-                    session.retrieval_mode)
+                    session.retrieval_mode, *control_state(session))
 
-        app.load(load, outputs=[status, trajectory_view, context_view, source_toggle, continue_button, retrieval_mode], **options)
+        app.load(load, outputs=[status, trajectory_view, context_view, source_toggle, retrieval_mode, *controls], **options)
+        planning_strategy.input(set_planning, inputs=[planning_strategy], outputs=[feedback, status, *controls], **options)
         source_toggle.change(set_source, inputs=[source_toggle], outputs=[context_view, status], **options)
         retrieval_mode.change(set_retrieval, inputs=[retrieval_mode], outputs=[feedback, status, trajectory_view, context_view], **options)
         compact_button.click(compact, inputs=[retained_turns], outputs=[feedback, trajectory_view, context_view], **options)
         source_reload.click(reload_source, outputs=[context_view, status], **options)
         trajectory_clear.click(clear_trajectory, outputs=[trajectory_view], **options)
-        send.click(update, inputs=[question, execution_mode, max_steps], outputs=outputs, **options)
-        question.submit(update, inputs=[question, execution_mode, max_steps], outputs=outputs, **options)
-        stop_button.click(stop_action, outputs=[feedback, status, trajectory_view], concurrency_id="session4-stop", concurrency_limit=None)
-        continue_button.click(continue_action, outputs=[conversation, feedback, status, trajectory_view, context_view, continue_button], **options)
+        send_inputs = [question, execution_mode, max_steps, planning_strategy]
+        send.click(update, inputs=send_inputs, outputs=outputs, **options)
+        question.submit(update, inputs=send_inputs, outputs=outputs, **options)
+        stop_button.click(stop_action, outputs=[feedback, status, trajectory_view, *controls], concurrency_id="session4-stop", concurrency_limit=None)
+        continue_button.click(continue_action, outputs=state_outputs, **options)
         quiz_start.click(activate_quiz, inputs=[quiz_topic], outputs=outputs, **options)
         quiz_end.click(deactivate_quiz, outputs=outputs, **options)
-        clear_button.click(clear, outputs=[conversation, feedback, trajectory_view, context_view, continue_button], **options)
+        clear_button.click(clear, outputs=state_outputs, **options)
         reload_button.click(reload_context, outputs=[feedback, context_view, status], **options)
         save_button.click(save, outputs=[download, feedback], **options)
         end_button.click(end, outputs=[feedback], **options)

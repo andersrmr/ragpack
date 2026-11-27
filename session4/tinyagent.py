@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
+from planning import PLANNING_STRATEGIES, PLAN_AND_SOLVE, REACT, NativePlanAndSolve, PlanState, render_checklist
+
 
 def _safe_error(error):
     message = f"{type(error).__name__}: {error}"
@@ -111,18 +113,37 @@ class Run:
     mode: str = "manual"
     max_steps: int = 1
     outcome: str = "active"
+    planning_strategy: str = REACT
+    plan: PlanState | None = None
+    tools_enabled: bool = True
+    elapsed_seconds: float = 0.0
+
+    def metrics(self):
+        actions = [step.action for step in self.steps if step.kind == "tool_action"]
+        calls = [call for action in actions for call in action.get("calls", [action])]
+        tokens = [(step.metadata or {}).get("total_tokens") for step in self.steps]
+        return {
+            "model_requests": len(self.steps),
+            "tool_calls": len(calls),
+            "planning_tool_calls": sum((call.get("tool") or call.get("name")) in NativePlanAndSolve.tool_names
+                                       for call in calls),
+            "total_tokens": sum(tokens) if tokens and None not in tokens else None,
+            "elapsed_seconds": round(self.elapsed_seconds, 4),
+        }
 
 
 class Trajectory:
     def __init__(self):
         self.runs: list[Run] = []
         self.events: list[dict] = []
+        self._next_run_id = 1
 
     def initialize(self, query: str, metadata: dict | None = None) -> Run:
-        run = Run(len(self.runs) + 1, query,
+        run = Run(self._next_run_id, query,
                   datetime.now(ZoneInfo("America/New_York")).isoformat(),
                   dict(metadata or {}))
         self.runs.append(run)
+        self._next_run_id += 1
         return run
 
     def clear(self):
@@ -133,8 +154,9 @@ class Trajectory:
         self.events.append({"kind": kind, "time": datetime.now(ZoneInfo("America/New_York")).isoformat(), **details})
 
     def to_dict(self):
-        return {"schema_version": 3, "runs": [
-            {**asdict(run), "steps": [asdict(step) for step in run.steps]}
+        return {"schema_version": 4, "runs": [
+            {**asdict(run), "plan": run.plan.snapshot() if run.plan is not None else None,
+             "metrics": run.metrics()}
             for run in self.runs], "events": copy.deepcopy(self.events)}
 
 
@@ -191,7 +213,9 @@ class NativeTools:
         if parameters is None:
             properties, required = {}, []
             for key, param in signature.parameters.items():
-                properties[key] = {"type": _TYPE_MAP.get(param.annotation, "string")}
+                properties[key] = ({"type": "array", "items": {"type": "string"}}
+                                   if param.annotation == list[str]
+                                   else {"type": _TYPE_MAP.get(param.annotation, "string")})
                 if param.default is inspect.Parameter.empty:
                     required.append(key)
             parameters = {"type": "object", "properties": properties,
@@ -236,6 +260,10 @@ class NativeTools:
             for key, value in bound.arguments.items():
                 annotation = item["signature"].parameters[key].annotation
                 expected = (int, float) if annotation is float else annotation
+                if annotation == list[str]:
+                    if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
+                        raise TypeError(f"Argument {key!r} must be a list of strings.")
+                    continue
                 if expected is not inspect.Parameter.empty and (
                     not isinstance(value, expected) or
                     (annotation is float and isinstance(value, bool)) or
@@ -426,15 +454,23 @@ class TinyAgent:
     def __init__(self, llm, memory, system_instructions=None, tools=None, rag_memory=None):
         self.llm, self.memory = llm, memory
         self.system_instructions = list(system_instructions or [])
-        self.tools = tools or NativeTools()
+        self.tools = copy.copy(tools) if tools is not None else NativeTools()
+        if tools is not None:
+            # Bound planning and retrieval methods belong to this agent.
+            self.tools.registry = dict(tools.registry)
         self.trajectory = Trajectory()
         self.pending_continue = False
         self.active_run: Run | None = None
+        self._planning_strategy = REACT
+        self.planner = NativePlanAndSolve(lambda: self.active_run)
+        self.planner.register(self.tools)
         self.rag_memory = rag_memory
         self.retrieval_mode = "Off"
         self.turn_retrieval = None
         self._include_retrieval_once = False
         self._run_lock = threading.Lock()
+        self._stop_lock = threading.Lock()
+        self._executing = False
         self._stop_requested = threading.Event()
         if self.rag_memory:
             def search_documents(query: str, top_k: int = 3):
@@ -456,9 +492,61 @@ class TinyAgent:
             raise RuntimeError("Document retrieval is not configured.")
         self.retrieval_mode = mode
 
+    @property
+    def planning_strategy(self):
+        return self._planning_strategy
+
+    def set_planning_strategy(self, strategy):
+        if strategy not in PLANNING_STRATEGIES:
+            raise ValueError("Unknown planning strategy.")
+        if strategy == self.planning_strategy:
+            return
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Cannot change planning strategy while a run is active.")
+        try:
+            if self.pending_continue:
+                raise RuntimeError("Continue, stop, or clear the paused run before changing planning strategy.")
+            self._planning_strategy = strategy
+        finally:
+            self._run_lock.release()
+
+    def plan_status(self):
+        run = self.active_run
+        lines = [f"Planning strategy: {self.planning_strategy}"]
+        if run:
+            lines.append(f"Run {run.run_id}: {run.planning_strategy} · {run.outcome}")
+        plan = run.plan if run else None
+        if plan is None or not plan.tasks:
+            lines.append("No plan exists for this run.")
+        else:
+            snapshot = plan.snapshot()
+            pending = snapshot["pending_count"]
+            lines.extend([
+                f"Revision {plan.revision} · {len(plan.tasks) - pending} declared done · {pending} pending",
+                render_checklist(snapshot["tasks"]),
+            ])
+            if run.outcome == "completed" and pending:
+                lines.append("The model returned a final response with unfinished plan items.")
+        return "\n\n".join(lines)
+
+    def clear_conversation(self):
+        if not self._run_lock.acquire(blocking=False):
+            raise RuntimeError("Cannot clear while a run is active.")
+        try:
+            if self.pending_continue:
+                self._finish_run(self.active_run, "stopped")
+            self.memory.clear()
+            self.active_run = None
+            self.turn_retrieval = None
+            self._include_retrieval_once = False
+        finally:
+            self._run_lock.release()
+
     def build_messages(self):
         instructions = [{"role": "system", "content": text}
                         for text in self.system_instructions if text and text.strip()]
+        if self.active_run and self.active_run.plan is not None:
+            instructions.append({"role": "developer", "content": self.planner.instructions})
         if self.memory.summary:
             instructions.append({"role": "developer", "content": "## Compacted conversation summary\n\n" + self.memory.summary})
         if self._include_retrieval_once and self.turn_retrieval is not None:
@@ -469,44 +557,72 @@ class TinyAgent:
         return instructions + [dict(item) for item in self.memory.get_messages()]
 
     def request_stop(self):
-        if not self._run_lock.locked():
-            return False
-        self._stop_requested.set()
-        return True
+        with self._stop_lock:
+            if self._executing:
+                self._stop_requested.set()
+                return True
+            if not self._run_lock.acquire(blocking=False):
+                return False
+            try:
+                if not self.pending_continue:
+                    return False
+                self._finish_run(self.active_run, "stopped")
+                return True
+            finally:
+                self._run_lock.release()
+
+    def _begin_execution(self):
+        with self._stop_lock:
+            if not self._run_lock.acquire(blocking=False):
+                raise RuntimeError("A run is already active.")
+            self._executing = True
+
+    def _end_execution(self):
+        with self._stop_lock:
+            # Honor a stop that arrived just as a manual action was pausing.
+            if self._stop_requested.is_set() and self.pending_continue:
+                self._finish_run(self.active_run, "stopped")
+            self._stop_requested.clear()
+            self._executing = False
+            self._run_lock.release()
 
     @property
     def run_active(self):
         return self._run_lock.locked()
 
-    def run(self, task, run_metadata=None, remember=True, mode="manual", max_steps=10):
+    def run(self, task, run_metadata=None, remember=True, mode="manual", max_steps=10, *, tools_enabled=True):
         if mode not in {"manual", "autonomous"}:
             raise ValueError("mode must be manual or autonomous")
         if not isinstance(max_steps, int) or max_steps < 1:
             raise ValueError("max_steps must be a positive integer")
-        if not self._run_lock.acquire(blocking=False):
-            raise RuntimeError("A run is already active.")
-        self._stop_requested.clear()
+        self._begin_execution()
+        started = time.perf_counter()
         try:
-            return self._run(task, run_metadata, remember, mode, max_steps)
-        except Exception as error:
-            if self.active_run is not None:
-                self.active_run.outcome = "error"
-                self.trajectory.record_event("run_finished", run_id=self.active_run.run_id,
-                                             mode=mode, outcome="error",
-                                             error={"type": type(error).__name__,
-                                                    "message": _safe_error(error)})
-            raise
+            if self.pending_continue:
+                raise RuntimeError("A tool action is waiting. Use Continue before a new request.")
+            run = self.trajectory.initialize(task, run_metadata)
+            run.mode, run.max_steps = mode, max_steps
+            run.tools_enabled = tools_enabled
+            run.planning_strategy = self.planning_strategy if tools_enabled else REACT
+            if run.planning_strategy == PLAN_AND_SOLVE:
+                run.plan = PlanState()
+            self.active_run = run
+            try:
+                return self._run(task, remember)
+            except Exception as error:
+                self._finish_run(run, "error", error=error)
+                raise
+            finally:
+                run.elapsed_seconds += time.perf_counter() - started
         finally:
-            self._run_lock.release()
+            self._end_execution()
 
-    def _run(self, task, run_metadata=None, remember=True, mode="manual", max_steps=10):
-        if self.pending_continue:
-            raise RuntimeError("A tool action is waiting. Use Continue before a new request.")
+    def _run(self, task, remember):
+        run = self.active_run
         if remember:
             self.memory.add("user", task)
         else:
             self.memory.messages.append({"role": "user", "content": task})
-        metadata = dict(run_metadata or {})
         self.turn_retrieval = None
         if self.retrieval_mode == "Automatic RAG":
             # Deliberately use this user turn alone: no query rewriting or history merge.
@@ -518,7 +634,7 @@ class TinyAgent:
                                    "threshold_decision": "matches accepted" if matches else "no passage cleared threshold",
                                    "text_added": ("## Temporary local retrieval context\n" + json.dumps(matches, ensure_ascii=False)
                                                   if matches else "## Temporary local retrieval context\nNo relevant local passage was retrieved.")}
-            metadata["automatic_retrieval"] = copy.deepcopy(self.turn_retrieval)
+            run.metadata["automatic_retrieval"] = copy.deepcopy(self.turn_retrieval)
             self.trajectory.record_event("automatic_retrieval", query=task,
                                          result_ids=[m["document_id"] for m in matches],
                                          scores=[m["score"] for m in matches],
@@ -526,77 +642,70 @@ class TinyAgent:
             self._include_retrieval_once = True
         else:
             self._include_retrieval_once = False
-        self.active_run = self.trajectory.initialize(task, metadata)
-        self.active_run.mode, self.active_run.max_steps = mode, max_steps
-        if mode == "manual":
-            result = self._step()
-            if self.active_run.outcome == "stopped":
-                pass
-            elif not result.tool_call:
-                self.active_run.outcome = "completed"
-            else:
-                self.active_run.outcome = "waiting_continue"
-            return result
-        result = self._autonomous_loop(max_steps)
+        if run.mode == "manual":
+            return self._manual_step()
+        return self._autonomous_loop(run.max_steps)
+
+    def _finish_run(self, run, outcome, error=None):
+        run.outcome = outcome
+        self.pending_continue = False
+        plan = run.plan.snapshot() if run.plan is not None else None
+        details = {"run_id": run.run_id, "mode": run.mode, "planning_strategy": run.planning_strategy,
+                   "outcome": outcome, "steps": len(run.steps), "max_steps": run.max_steps,
+                   "pending_plan_tasks": plan["pending_count"] if plan and plan["tasks"] else None}
+        if error is not None:
+            details["error"] = {"type": type(error).__name__, "message": _safe_error(error)}
+        self.trajectory.record_event("run_finished", **details)
+
+    def _manual_step(self):
+        run = self.active_run
+        run.outcome = "active"
+        result = self._step()
+        if run.outcome == "stopped" or (result.tool_call and self._stop_requested.is_set()):
+            self._finish_run(run, "stopped")
+        elif self.pending_continue:
+            run.outcome = "waiting_continue"
+        else:
+            self._finish_run(run, "error" if result.tool_call else "completed")
         return result
 
     def _autonomous_loop(self, max_steps):
         run = self.active_run
         result = Response()
+        outcome = "max_steps"
         while len(run.steps) < max_steps:
             if self._stop_requested.is_set():
-                run.outcome = "stopped"
-                self.pending_continue = False
+                outcome = "stopped"
                 break
             result = self._step()
-            if run.outcome == "stopped":
+            if run.outcome == "stopped" or (result.tool_call and self._stop_requested.is_set()):
+                outcome = "stopped"
                 break
             if not result.tool_call:
-                run.outcome = "completed"
+                outcome = "completed"
                 break
-            if len(run.steps) >= max_steps:
-                run.outcome = "max_steps"
-                self.pending_continue = False
-                break
-            if self._stop_requested.is_set():
-                run.outcome = "stopped"
-                self.pending_continue = False
-                break
-        else:
-            run.outcome = "max_steps"
-        if run.outcome == "active":
-            run.outcome = "max_steps"
-        self.trajectory.record_event("run_finished", run_id=run.run_id, mode=run.mode,
-                                     outcome=run.outcome, steps=len(run.steps), max_steps=max_steps)
-        result.metadata = dict(result.metadata or {}, run_outcome=run.outcome,
+        self._finish_run(run, outcome)
+        result.metadata = dict(result.metadata or {}, run_outcome=outcome,
                                steps_used=len(run.steps), max_steps=max_steps)
         return result
 
     def continue_step(self):
-        if not self.pending_continue or self.active_run is None:
-            raise RuntimeError("No tool action is waiting for Continue.")
-        if not self._run_lock.acquire(blocking=False):
-            raise RuntimeError("A run is already active.")
+        self._begin_execution()
+        started = time.perf_counter()
         try:
+            if not self.pending_continue:
+                raise RuntimeError("No tool action is waiting for Continue.")
+            run = self.active_run
             self.pending_continue = False
             try:
-                result = self._step()
+                return self._manual_step()
             except Exception as error:
-                self.active_run.outcome = "error"
-                self.trajectory.record_event("run_finished", run_id=self.active_run.run_id,
-                                             mode=self.active_run.mode, outcome="error",
-                                             error={"type": type(error).__name__,
-                                                    "message": _safe_error(error)})
+                self._finish_run(run, "error", error=error)
                 raise
-            if self.active_run.outcome == "stopped":
-                pass
-            elif not result.tool_call:
-                self.active_run.outcome = "completed"
-            else:
-                self.active_run.outcome = "waiting_continue"
-            return result
+            finally:
+                run.elapsed_seconds += time.perf_counter() - started
         finally:
-            self._run_lock.release()
+            self._end_execution()
 
     def compact_memory(self, retain_turns=2):
         if self.pending_continue:
@@ -623,8 +732,12 @@ class TinyAgent:
     def _step(self):
         run = self.active_run
         messages = self.build_messages()
-        include_tool = self.retrieval_mode == "Model-directed retrieval"
-        schemas = self.tools.schemas if include_tool else [s for s in self.tools.schemas if s["name"] != "search_documents"]
+        unavailable = set()
+        if self.retrieval_mode != "Model-directed retrieval":
+            unavailable.add("search_documents")
+        if run.plan is None:
+            unavailable.update(self.planner.tool_names)
+        schemas = [schema for schema in self.tools.schemas if schema["name"] not in unavailable] if run.tools_enabled else []
         self._include_retrieval_once = False
         started = time.perf_counter()
         if self._stop_requested.is_set():
@@ -650,7 +763,8 @@ class TinyAgent:
                                   self.llm.model, _observable_messages(messages), elapsed,
                                   action={"tool": (response.tool_call or {}).get("name")
                                           if response.tool_call and "multiple_calls" not in response.tool_call else "pending"},
-                                  observation="Stop requested during model request; the uncommitted response and any pending action were discarded."))
+                                  observation="Stop requested during model request; the uncommitted response and any pending action were discarded.",
+                                  metadata=response.metadata))
             run.duration_seconds += elapsed
             self.pending_continue = False
             return Response(content="Stopped. The returned pending action was discarded and the conversation is consistent.",
@@ -661,14 +775,19 @@ class TinyAgent:
                     reasoning=response.reasoning or "Unavailable: the provider supplied no reasoning summary.",
                     metadata=response.metadata)
         call = response.tool_call
+        if call and not run.tools_enabled:
+            error = "Unexpected tool call in a tool-free request."
+            run.steps.append(Step(kind="model_request", **base,
+                                  error={"type": "UnexpectedToolCall", "message": error}))
+            run.duration_seconds += elapsed
+            raise RuntimeError(error)
         if response.protocol_items:
             # Responses reasoning items are opaque protocol state. Retain the
             # provider's complete output sequence for the next API request.
             self.memory.messages.extend(copy.deepcopy(response.protocol_items))
         if call and "multiple_calls" in call:
             # Keep the exact provider requests visible, reject as a single explicit error.
-            call_id = call["multiple_calls"][0].get("call_id", "")
-            text = f"Rejected {len(call['multiple_calls'])} function calls: Stage A executes one action per step."
+            text = f"Rejected {len(call['multiple_calls'])} function calls: TinyAgent executes one action per step."
             if response.content and not response.protocol_items:
                 self.memory.add("assistant", response.content)
             if not response.protocol_items:
@@ -685,8 +804,11 @@ class TinyAgent:
                 self.memory.add("assistant", response.content)
             if not response.protocol_items:
                 self.memory.add_function_call(call)
-            if call.get("name") == "search_documents" and self.retrieval_mode != "Model-directed retrieval":
-                error = "search_documents is available only in Model-directed retrieval mode."
+            name = call.get("name")
+            prior_plan = run.plan
+            if name in unavailable:
+                required_mode = "Model-directed retrieval mode" if name == "search_documents" else PLAN_AND_SOLVE
+                error = f"{name} is available only in {required_mode}."
                 observation = f"Tool error: RuntimeError: {error}"
             else:
                 observation, error = self.tools.execute(call)
@@ -696,6 +818,8 @@ class TinyAgent:
             run.steps.append(Step(kind="tool_action", **base, action=action,
                                   observation=observation,
                                   error={"type": "ToolExecutionError", "message": error} if error else None))
+            if prior_plan is not run.plan:
+                self._record_plan_change(run, prior_plan, action)
             run.duration_seconds += elapsed
             self.pending_continue = True
             return Response(content=observation, reasoning=response.reasoning,
@@ -708,3 +832,16 @@ class TinyAgent:
         run.duration_seconds += elapsed
         self.pending_continue = False
         return response
+
+    def _record_plan_change(self, run, prior_plan, action):
+        before = {task.task_id: task for task in prior_plan.tasks}
+        after = {task.task_id: task for task in run.plan.tasks}
+        self.trajectory.record_event(
+            "plan_changed", run_id=run.run_id, step_id=len(run.steps),
+            operation=action["tool"], call_id=action["call_id"],
+            previous_revision=prior_plan.revision, plan=run.plan.snapshot(),
+            added=[asdict(task) for task_id, task in after.items() if task_id not in before],
+            removed=[asdict(task) for task_id, task in before.items() if task_id not in after],
+            declared_done_task_ids=[task_id for task_id, task in after.items()
+                                    if task_id in before and before[task_id].status != task.status],
+        )

@@ -5,6 +5,7 @@ import threading
 
 from openai import APIConnectionError, APIError, APIStatusError, AuthenticationError, RateLimitError
 from context import PersistentContext, SourceCodeContext, compose_instructions
+from planning import PLAN_AND_SOLVE, REACT
 from quiz import QuizManager
 from rich.console import Console
 from rich.markdown import Markdown
@@ -13,18 +14,32 @@ from retrieval import EmbeddingModel, RAGMemory
 from transcripts import format_transcript, write_transcript
 
 
+def show_action(console, action, observation):
+    console.print("[bold]Action[/bold]", action)
+    console.print("[bold]Observation[/bold]")
+    console.print(observation, markup=False)
+
+
 def chat(agent, context, quiz, source_context):
     console = Console()
     active_worker = None
-    print(f"TinyAgent Session 4 Stage A | Model: {agent.llm.model}")
+    print(f"TinyAgent Session 4 Stage B | Model: {agent.llm.model}")
     print(f"Retrieval mode: {agent.retrieval_mode}")
+    print(f"Planning strategy: {agent.planning_strategy}")
     execution_mode, max_steps = "manual", 10
     print("Execution mode: Manual Continue (default), max steps: 10")
     print("Commands: /continue, /mode manual|autonomous, /steps N, /stop, /compact [retain_turns], /retrieval off|automatic|directed, /clear, /save filename.md,")
+    print("/planner react|plan-and-solve|status, /plan")
     print("/quiz [topic], /quiz end, /context reload, /source on|off|status|reload, /quit\n")
     while True:
         text = input("You: ").strip()
         if not text:
+            continue
+        if text == "/plan":
+            print(agent.plan_status(), "\n")
+            continue
+        if text == "/planner status":
+            print(f"Planning strategy: {agent.planning_strategy}\n")
             continue
         if text == "/quit":
             if active_worker and active_worker.is_alive():
@@ -33,10 +48,21 @@ def chat(agent, context, quiz, source_context):
             break
         if active_worker and active_worker.is_alive():
             if text == "/stop":
-                print("Stop requested. Any in-flight request or tool will finish safely before stopping.\n")
-                agent.request_stop()
+                if agent.request_stop():
+                    print("Stop requested. Any in-flight request or tool will finish safely before stopping.\n")
             else:
                 print("A run is active. Use /stop or wait for it to finish.\n")
+            continue
+        if text == "/planner" or text.startswith("/planner "):
+            strategy = {"react": REACT, "plan-and-solve": PLAN_AND_SOLVE}.get(text.partition(" ")[2].strip().lower())
+            if strategy is None:
+                print("Usage: /planner react|plan-and-solve|status\n")
+            else:
+                try:
+                    agent.set_planning_strategy(strategy)
+                    print(f"Planning strategy: {agent.planning_strategy}\n")
+                except RuntimeError as error:
+                    print(f"{error}\n", file=sys.stderr)
             continue
         if text.startswith("/mode "):
             requested = text.partition(" ")[2].strip().lower()
@@ -48,20 +74,19 @@ def chat(agent, context, quiz, source_context):
             continue
         if text.startswith("/steps "):
             try:
-                max_steps = int(text.partition(" ")[2])
-                if max_steps < 1:
+                requested_steps = int(text.partition(" ")[2])
+                if requested_steps < 1:
                     raise ValueError
+                max_steps = requested_steps
                 print(f"Maximum model steps: {max_steps}\n")
             except ValueError:
                 print("Usage: /steps positive_integer\n")
             continue
         if text == "/stop":
-            print("No run is active.\n")
+            print("Paused run stopped.\n" if agent.request_stop() else "No run is active or paused.\n")
             continue
         if text == "/clear":
-            agent.memory.clear()
-            agent.pending_continue = False
-            agent.active_run = None
+            agent.clear_conversation()
             print("Conversation cleared; persistent context and trajectory retained.\n")
             continue
         if text.startswith("/retrieval "):
@@ -90,9 +115,9 @@ def chat(agent, context, quiz, source_context):
                 compose_instructions(agent, context, source_context, quiz)
                 result = agent.continue_step()
                 if result.tool_call:
-                    console.print("TinyAgent requested another tool action; it has been executed.")
-                    console.print("[bold]Action[/bold]", result.tool_call)
-                    console.print("[bold]Observation[/bold]", result.content)
+                    show_action(console, result.tool_call, result.content)
+                    if agent.pending_continue:
+                        console.print("Use /continue to request exactly one next model step.")
                 else:
                     console.print("TinyAgent:")
                     console.print(Markdown(result.content))
@@ -145,22 +170,31 @@ def chat(agent, context, quiz, source_context):
                 print(f"Could not start quiz: {error}\n", file=sys.stderr)
             continue
 
-        if execution_mode == "autonomous":
+        if execution_mode == "autonomous" and not quiz.active:
             def run_autonomously(task):
                 compose_instructions(agent, context, source_context, quiz)
                 history_length = len(agent.memory.messages)
+                previous_run = agent.active_run
                 try:
                     result = agent.run(task, mode="autonomous", max_steps=max_steps)
-                    if result.tool_call:
-                        console.print("[bold]Final action observation[/bold]")
-                        console.print(result.content)
-                    elif result.content:
-                        console.print("TinyAgent:")
-                        console.print(Markdown(result.content))
-                    console.print(f"Run outcome: {agent.active_run.outcome}; {len(agent.active_run.steps)}/{max_steps} model steps used.\n")
                 except Exception as error:
                     del agent.memory.messages[history_length:]
                     print(f"Run outcome: error ({type(error).__name__}: {error})\n", file=sys.stderr)
+                    result = None
+                run = agent.active_run
+                if run is previous_run:
+                    return
+                for step in run.steps:
+                    if step.kind == "tool_action":
+                        show_action(console, step.action, step.observation)
+                if result and not result.tool_call and result.content:
+                    console.print("TinyAgent:")
+                    console.print(Markdown(result.content))
+                metrics = run.metrics()
+                tokens = metrics["total_tokens"] if metrics["total_tokens"] is not None else "unavailable"
+                print(f"Run outcome: {run.outcome} | Model requests: {metrics['model_requests']}/{max_steps}"
+                      f" | Tool calls: {metrics['tool_calls']} ({metrics['planning_tool_calls']} planning)"
+                      f" | Tokens: {tokens} | Elapsed: {metrics['elapsed_seconds']:.2f}s\n")
             active_worker = threading.Thread(target=run_autonomously, args=(text,), daemon=True)
             active_worker.start()
             print("Autonomous run started. Enter /stop to request a cooperative stop.\n")
@@ -169,6 +203,7 @@ def chat(agent, context, quiz, source_context):
         compose_instructions(agent, context, source_context, quiz)
         history_length = len(agent.memory.messages)
         try:
+            result = None
             if quiz.active:
                 answer = quiz.answer(agent, text)
             else:
@@ -190,20 +225,13 @@ def chat(agent, context, quiz, source_context):
                 message = "Unexpected request error; previous conversation was kept."
             print(f"{message}\n", file=sys.stderr)
             continue
-        if result.tool_call:
-            console.print("[bold]Action[/bold]")
-            console.print(f"Tool: {result.tool_call.get('tool')}\nArguments: {result.tool_call.get('arguments')}")
-            console.print("[bold]Observation[/bold]")
-            console.print(answer)
-            if execution_mode == "manual":
+        if result and result.tool_call:
+            show_action(console, result.tool_call, answer)
+            if agent.pending_continue:
                 console.print("Use /continue to request exactly one next model step.")
-            else:
-                console.print(f"Run outcome: {agent.active_run.outcome}; {len(agent.active_run.steps)}/{max_steps} model steps used.")
         else:
             console.print("TinyAgent:")
             console.print(Markdown(answer))
-            if execution_mode == "autonomous":
-                console.print(f"Run outcome: {agent.active_run.outcome}; {len(agent.active_run.steps)}/{max_steps} model steps used.")
         console.print()
 
 
